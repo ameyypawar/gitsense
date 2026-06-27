@@ -1,0 +1,43 @@
+[package]
+name = "gitsense"
+version = "0.1.0"
+edition = "2021"
+default-run = "gitsense-mcp"
+
+[[bin]]
+name = "gitsense-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP server framework
+rmcp = { version = "1.8.0", features = ["server", "macros", "transport-streamable-http-server"] }
+
+# Tree-sitter trio — aligned on tree-sitter 0.25.x
+# tree-sitter-rust 0.24.2 requires ^0.25; tree-sitter-tags 0.25.9 requires ^0.25.9
+tree-sitter = "0.25.10"
+tree-sitter-rust = "0.24.2"
+tree-sitter-tags = "0.25.9"
+
+# Git library — blame + revision features confirmed present in 0.85
+gix = { version = "0.85", default-features = false, features = ["blame", "revision", "sha1"] }
+
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging/tracing
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# File walking
+walkdir = "2"
