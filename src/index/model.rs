@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub enum SymbolKind {
     Fn,
     Method,
