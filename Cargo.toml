@@ -24,8 +24,11 @@ tree-sitter-tags = "0.25.9"
 # Git library — blame + revision features confirmed present in 0.85
 gix = { version = "0.85", default-features = false, features = ["blame", "revision", "sha1"] }
 
+# HTTP transport (axum 0.8 = exact version rmcp 1.8.0 uses in its own tests)
+axum = { version = "0.8", features = ["http1", "tokio"], default-features = false }
+
 # Async runtime
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

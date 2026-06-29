@@ -5,6 +5,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use gitsense::{
+    http::build_router,
     index::SymbolIndex,
     tools::{AppState, GitSenseServer},
 };
@@ -19,13 +20,31 @@ struct Cli {
     #[arg(long, env = "REPO_PATH", default_value = ".")]
     repo_path: PathBuf,
 
-    /// Transport to use: stdio (Phase 6) or http (Phase 7, not yet implemented).
+    /// Transport to use: stdio or http.
     #[arg(long, default_value = "stdio")]
     transport: String,
 
-    /// HTTP port (unused until Phase 7).
+    /// HTTP port (used when --transport http).
     #[arg(long, default_value_t = 8080)]
     port: u16,
+}
+
+// ── Shared state construction ─────────────────────────────────────────────────
+
+async fn build_state(repo_path: PathBuf) -> anyhow::Result<Arc<AppState>> {
+    let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
+    tracing::info!("building index for {}", repo_path.display());
+    let t0 = std::time::Instant::now();
+    let index = SymbolIndex::build(&repo_path)?;
+    tracing::info!(
+        "index ready in {:.1}s ({} defs)",
+        t0.elapsed().as_secs_f32(),
+        index.stats().def_count,
+    );
+    Ok(Arc::new(AppState {
+        index: Arc::new(index),
+        repo_root: repo_path,
+    }))
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -44,40 +63,25 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.transport.as_str() {
         "http" => {
-            anyhow::bail!("HTTP transport not implemented yet — added in Phase 7");
+            let state = build_state(cli.repo_path).await?;
+            let router = build_router(state);
+            let addr = format!("0.0.0.0:{}", cli.port);
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            eprintln!("gitsense-mcp listening on http://0.0.0.0:{}/mcp", cli.port);
+            tracing::info!("gitsense-mcp listening on http://0.0.0.0:{}/mcp", cli.port);
+            axum::serve(listener, router).await?;
         }
-        "stdio" => {}
+        "stdio" => {
+            let state = build_state(cli.repo_path).await?;
+            let server = GitSenseServer::new(state);
+            tracing::info!("gitsense-mcp listening on stdio");
+            let service = server.serve(rmcp::transport::stdio()).await?;
+            service.waiting().await?;
+        }
         other => {
-            anyhow::bail!("unknown transport '{}'; supported: stdio", other);
+            anyhow::bail!("unknown transport '{}'; supported: stdio, http", other);
         }
     }
-
-    let repo_path = cli
-        .repo_path
-        .canonicalize()
-        .unwrap_or(cli.repo_path.clone());
-
-    // Build the symbol index (sync, potentially slow — log timing).
-    tracing::info!("building index for {}", repo_path.display());
-    let t0 = std::time::Instant::now();
-    let index = SymbolIndex::build(&repo_path)?;
-    tracing::info!(
-        "index ready in {:.1}s ({} defs)",
-        t0.elapsed().as_secs_f32(),
-        index.stats().def_count,
-    );
-
-    let state = Arc::new(AppState {
-        index: Arc::new(index),
-        repo_root: repo_path,
-    });
-
-    let server = GitSenseServer::new(state);
-
-    tracing::info!("gitsense-mcp listening on stdio");
-
-    let service = server.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
 
     Ok(())
 }
