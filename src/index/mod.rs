@@ -158,6 +158,11 @@ impl SymbolIndex {
         self.tags_by_file.get(file)
     }
 
+    /// Returns all file paths present in the index.
+    pub fn file_paths(&self) -> Vec<&PathBuf> {
+        self.tags_by_file.keys().collect()
+    }
+
     /// Aggregate statistics over the full index.
     pub fn stats(&self) -> RepoStats {
         let file_count = self.tags_by_file.len();
