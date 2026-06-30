@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 
-use crate::git::blame::blame_range;
+use crate::git::blame::{blame_last_ts_with_repo, blame_range};
 
 /// Return the Unix timestamp (seconds) of the most recent commit that touched
 /// the given `line_range` (1-based inclusive) in `file`.
@@ -24,6 +24,29 @@ pub fn last_touched(
         )
     })?;
     Ok(result.last_timestamp)
+}
+
+/// Open the repo once and return the last-touched Unix timestamp for each
+/// `(file_rel, line_range)` pair.  `None` is returned for any item where
+/// blame fails (new file, empty range, no commits, etc.).
+///
+/// # Purpose
+/// Used by `find_dead_code` to enrich many candidates in a single
+/// `spawn_blocking` closure with a single `gix::open` rather than one per
+/// candidate.  The `!Send` `gix::Repository` is created and dropped entirely
+/// inside this synchronous function.
+pub fn last_touched_all(repo_root: &Path, items: &[(PathBuf, (usize, usize))]) -> Vec<Option<i64>> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let repo = match gix::open(repo_root) {
+        Ok(r) => r,
+        Err(_) => return vec![None; items.len()],
+    };
+    items
+        .iter()
+        .map(|(file, lr)| blame_last_ts_with_repo(&repo, file, lr.0, lr.1).ok())
+        .collect()
 }
 
 /// Count how many commits in HEAD's history touched each file in `files`.

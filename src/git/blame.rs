@@ -4,6 +4,74 @@ use anyhow::Context as _;
 
 use crate::git::{BlameLine, BlameResult};
 
+/// Compute blame for `[start_line, end_line]` (1-based, inclusive) using an
+/// already-open `repo`.  `file_rel` must be repo-relative (forward-slash
+/// components are acceptable on all platforms).
+///
+/// Returns only the last-touched Unix timestamp — cheaper than constructing
+/// the full [`BlameResult`].  Used by batch callers that open the repo once
+/// and blame many files without reopening.
+///
+/// # Safety / !Send note
+/// The caller must ensure this is invoked inside a `spawn_blocking` closure.
+/// `gix::Repository` is `!Send`; the `!Send` value never escapes the closure.
+pub(crate) fn blame_last_ts_with_repo(
+    repo: &gix::Repository,
+    file_rel: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> anyhow::Result<i64> {
+    let head_id = repo
+        .head_id()
+        .map_err(|e| anyhow::anyhow!("repository has no commits: {e}"))?;
+
+    let file_str: String = file_rel
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .join("/");
+    let file_bstring: gix::bstr::BString = file_str.as_bytes().to_vec().into();
+
+    let ranges = gix::blame::BlameRanges::from_one_based_inclusive_range(
+        start_line as u32..=end_line as u32,
+    )
+    .map_err(|e| anyhow::anyhow!("invalid line range {start_line}..={end_line}: {e}"))?;
+
+    let options = gix::repository::blame_file::Options {
+        ranges,
+        ..Default::default()
+    };
+
+    let outcome = repo
+        .blame_file(file_bstring.as_ref(), head_id, options)
+        .with_context(|| {
+            format!(
+                "blame_file failed for '{}' lines {start_line}..={end_line}",
+                file_str
+            )
+        })?;
+
+    let mut last_ts = i64::MIN;
+    for entry in &outcome.entries {
+        let commit = repo
+            .find_object(entry.commit_id)
+            .with_context(|| format!("finding commit {}", entry.commit_id))?
+            .into_commit();
+        let ts = commit.time()?.seconds;
+        if ts > last_ts {
+            last_ts = ts;
+        }
+    }
+
+    if last_ts == i64::MIN {
+        anyhow::bail!(
+            "no blame entries for '{}' lines {start_line}..={end_line}",
+            file_str
+        );
+    }
+    Ok(last_ts)
+}
+
 /// Compute blame for `[start_line, end_line]` (1-based, inclusive) in `file`.
 ///
 /// `file` may be absolute or repo-relative; an absolute path is stripped to be

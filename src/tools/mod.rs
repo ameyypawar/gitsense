@@ -215,7 +215,7 @@ impl GitSenseServer {
     #[tool(
         description = "Find potentially unused (unreferenced) Rust symbols, enriched with git-history age. \
         APPROXIMATE: misses dynamic dispatch, trait objects, macros, and externally-referenced \
-        pub items. include_pub (default false) includes pub items. limit (default 50) caps results. \
+        pub items. include_pub (default false) includes pub items. limit (default 50, max 200) caps results. \
         Results sorted: non-pub first, then by days since last git touch (oldest first — safest to delete). \
         Uses git blame for age; symbols where blame fails appear with null days_since_last_touch."
     )]
@@ -223,10 +223,16 @@ impl GitSenseServer {
         &self,
         Parameters(p): Parameters<FindDeadCodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        /// Hard ceiling for `limit` to prevent runaway git work on the
+        /// unauthenticated endpoint.
+        const MAX_DEAD_CODE_LIMIT: usize = 200;
+
         let index = Arc::clone(&self.state.index);
         let repo_root = self.state.repo_root.clone();
         let include_pub = p.include_pub.unwrap_or(false);
-        let limit = p.limit.unwrap_or(50);
+        // Clamp client-supplied limit; saturating_mul avoids overflow when
+        // assembling the candidate pre-fetch window.
+        let limit = p.limit.unwrap_or(50).min(MAX_DEAD_CODE_LIMIT);
 
         // Collect unreferenced defs (cheap, no I/O).
         let unreferenced: Vec<_> = index
@@ -236,10 +242,12 @@ impl GitSenseServer {
             .cloned()
             .collect();
 
-        // Now enrich the top `limit` with git age via spawn_blocking.
-        // We enrich ALL candidates first (sorted by some heuristic), then truncate.
-        // To avoid O(n) git calls on huge repos, we cap git enrichment at limit.
-        let candidates: Vec<_> = unreferenced.into_iter().take(limit * 4).collect();
+        // Over-sample by 4× so we have room to sort by age and still return
+        // `limit` results after truncation.  saturating_mul guards overflow.
+        let candidates: Vec<_> = unreferenced
+            .into_iter()
+            .take(limit.saturating_mul(4))
+            .collect();
 
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -256,41 +264,52 @@ impl GitSenseServer {
             days_since_last_touch: Option<i64>,
         }
 
-        let mut entries: Vec<DeadEntry> = Vec::with_capacity(candidates.len());
-
-        for def in &candidates {
-            let file_rel = def
-                .location
-                .file
-                .strip_prefix(&index.repo_root)
-                .unwrap_or(&def.location.file)
-                .to_path_buf();
-            let (start, end) = def.line_range;
-            let repo_root2 = repo_root.clone();
-
-            let ts_opt = tokio::task::spawn_blocking(move || {
-                crate::git::history::last_touched(&repo_root2, &file_rel, (start, end)).ok()
-            })
-            .await
-            .unwrap_or(None);
-
-            let days = ts_opt.map(|ts| (now_secs - ts) / 86400);
-
-            entries.push(DeadEntry {
-                name: def.name.clone(),
-                kind: format!("{:?}", def.kind),
-                file: def
+        // Build the blame-input list: repo-relative path + line range.
+        // All candidates are serialised into owned Send types before entering
+        // spawn_blocking, so no gix type is captured by the closure.
+        let blame_items: Vec<(std::path::PathBuf, (usize, usize))> = candidates
+            .iter()
+            .map(|def| {
+                let file_rel = def
                     .location
                     .file
                     .strip_prefix(&index.repo_root)
                     .unwrap_or(&def.location.file)
-                    .to_string_lossy()
-                    .into_owned(),
-                line: def.location.line,
-                is_pub: def.is_pub,
-                days_since_last_touch: days,
-            });
-        }
+                    .to_path_buf();
+                (file_rel, def.line_range)
+            })
+            .collect();
+
+        // Single spawn_blocking: opens the repo once, blames every candidate
+        // inside, returns owned Vec<Option<i64>>.  The !Send gix::Repository
+        // is created and dropped entirely within this closure.
+        let timestamps: Vec<Option<i64>> = tokio::task::spawn_blocking(move || {
+            crate::git::history::last_touched_all(&repo_root, &blame_items)
+        })
+        .await
+        .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?;
+
+        let mut entries: Vec<DeadEntry> = candidates
+            .iter()
+            .zip(timestamps.iter())
+            .map(|(def, ts_opt)| {
+                let days = ts_opt.map(|ts| (now_secs - ts) / 86400);
+                DeadEntry {
+                    name: def.name.clone(),
+                    kind: format!("{:?}", def.kind),
+                    file: def
+                        .location
+                        .file
+                        .strip_prefix(&index.repo_root)
+                        .unwrap_or(&def.location.file)
+                        .to_string_lossy()
+                        .into_owned(),
+                    line: def.location.line,
+                    is_pub: def.is_pub,
+                    days_since_last_touch: days,
+                }
+            })
+            .collect();
 
         // Sort: non-pub first; within same pub tier, oldest (largest days) first.
         entries.sort_by(|a, b| {
