@@ -12,6 +12,14 @@ gitsense is a single-binary MCP server that gives AI agents structural and histo
 
 ---
 
+## Demo
+
+`blame_symbol` + `find_dead_code` against [`dtolnay/anyhow`](https://github.com/dtolnay/anyhow) (~500 commits of history):
+
+![gitsense demo](demo/gitsense-demo.gif)
+
+---
+
 ## Tools
 
 | Tool | What it does | Example question |
@@ -92,26 +100,6 @@ Example: blame the `chain` method in anyhow:
 ```
 
 Expected response includes `last_author`, `last_commit_short`, `last_date`, and per-hunk attribution for every line in the function body.
-
-<!-- ASCIINEMA PLACEHOLDER
-To record a demo, run:
-
-  asciinema rec demo.cast
-
-Then inside the recording, run gitsense-mcp over the anyhow clone and pipe
-two tool calls through it:
-
-  # 1. blame_symbol on a real anyhow function
-  echo '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"blame_symbol","arguments":{"name":"chain"}}}' \
-    | ./target/release/gitsense-mcp --repo-path /tmp/anyhow
-
-  # 2. find_dead_code to show the git-aged ranking
-  echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"find_dead_code","arguments":{"limit":5}}}' \
-    | ./target/release/gitsense-mcp --repo-path /tmp/anyhow
-
-Upload to asciinema.org, then replace this comment block with:
-  [![demo](https://asciinema.org/a/<ID>.svg)](https://asciinema.org/a/<ID>)
--->
 
 ---
 
