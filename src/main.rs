@@ -64,7 +64,11 @@ async fn main() -> anyhow::Result<()> {
     match cli.transport.as_str() {
         "http" => {
             let state = build_state(cli.repo_path).await?;
-            let router = build_router(state);
+            let allowed_hosts: Vec<String> = std::env::var("GITSENSE_ALLOWED_HOSTS")
+                .ok()
+                .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
+                .unwrap_or_else(|| vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]);
+            let router = build_router(state, allowed_hosts);
             let addr = format!("0.0.0.0:{}", cli.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
             eprintln!("gitsense-mcp listening on http://0.0.0.0:{}/mcp", cli.port);

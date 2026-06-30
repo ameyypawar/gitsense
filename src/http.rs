@@ -9,17 +9,15 @@ use crate::tools::{AppState, GitSenseServer};
 
 /// Build the shared MCP router.
 ///
-/// Mounts `StreamableHttpService` at `/mcp`. Reused verbatim by Phase 8 (Shuttle).
+/// Mounts `StreamableHttpService` at `/mcp`. Callers supply `allowed_hosts`
+/// directly so both the local binary and the Shuttle entry can configure it:
+/// - Local HTTP mode: reads `GITSENSE_ALLOWED_HOSTS` env, defaults to localhost.
+/// - Shuttle entry:   passes an empty vec (rmcp allows ALL hosts when the list
+///   is empty — correct for shuttle's reverse-proxy termination).
 ///
-/// DNS-rebinding protection comes from `StreamableHttpServerConfig::allowed_hosts`
-/// (default: localhost / 127.0.0.1 / ::1 only). Override via `GITSENSE_ALLOWED_HOSTS`
-/// (comma-separated) for public deployments.
-pub fn build_router(state: Arc<AppState>) -> Router {
-    let allowed_hosts: Vec<String> = std::env::var("GITSENSE_ALLOWED_HOSTS")
-        .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
-        .unwrap_or_else(|| vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]);
-
+/// Operators can restrict the Shuttle deployment by setting the
+/// `GITSENSE_ALLOWED_HOSTS` secret on shuttle.dev.
+pub fn build_router(state: Arc<AppState>, allowed_hosts: Vec<String>) -> Router {
     let config = StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts);
 
     let service = StreamableHttpService::<GitSenseServer, LocalSessionManager>::new(
