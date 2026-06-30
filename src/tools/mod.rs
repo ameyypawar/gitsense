@@ -5,16 +5,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use rmcp::{
-    ErrorData, ServerHandler,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData, ServerHandler,
 };
 use serde::Serialize;
 
 use crate::graph::{self, Direction};
-use crate::index::SymbolIndex;
 use crate::index::model::SymbolKind;
+use crate::index::SymbolIndex;
 
 use params::{
     BlameSymbolParams, CallGraphParams, FindDeadCodeParams, FindReferencesParams,
@@ -96,10 +95,12 @@ impl GitSenseServer {
     ///
     /// Accepted `kind` values: fn | method | struct | enum | trait | impl | mod
     /// | const | macro | other.
-    #[tool(description = "Search for symbols by name substring and/or kind in the indexed Rust repo. \
+    #[tool(
+        description = "Search for symbols by name substring and/or kind in the indexed Rust repo. \
         Case-insensitive name match. Accepted kind values: fn | method | struct | enum | trait | \
         impl | mod | const | macro | other. Note: struct/enum/type-alias nodes all tag as 'Struct' \
-        (tree-sitter-tags limitation). Returns definitions with file, line, visibility, and docs.")]
+        (tree-sitter-tags limitation). Returns definitions with file, line, visibility, and docs."
+    )]
     async fn search_symbols(
         &self,
         Parameters(p): Parameters<SearchSymbolsParams>,
@@ -113,9 +114,11 @@ impl GitSenseServer {
     }
 
     /// Find all recorded call-site references for a symbol name.
-    #[tool(description = "Find all recorded call-site references for an exact symbol name. \
+    #[tool(
+        description = "Find all recorded call-site references for an exact symbol name. \
         Returns file + line locations of every reference captured by tree-sitter. \
-        Note: dynamic dispatch, trait objects, and macro-expanded calls may not be captured.")]
+        Note: dynamic dispatch, trait objects, and macro-expanded calls may not be captured."
+    )]
     async fn find_references(
         &self,
         Parameters(p): Parameters<FindReferencesParams>,
@@ -129,11 +132,13 @@ impl GitSenseServer {
     ///
     /// CAVEAT: name-based resolution — overloads, closures, and
     /// macro-expanded calls may be mis-attributed.  Results are approximate.
-    #[tool(description = "Build a call graph rooted at a Rust function or method. \
+    #[tool(
+        description = "Build a call graph rooted at a Rust function or method. \
         direction: callees | callers | both (default: both). max_hops default: 3. \
         CAVEAT: name-based resolution — overloads, closures, and macro-expanded calls may \
         be mis-attributed or missing. Cycles are detected and reported. Graph may be truncated \
-        when max_hops is reached.")]
+        when max_hops is reached."
+    )]
     async fn call_graph(
         &self,
         Parameters(p): Parameters<CallGraphParams>,
@@ -154,11 +159,13 @@ impl GitSenseServer {
     ///
     /// Git history is the unique differentiator: see exactly who last touched
     /// a function's body and in which commit.
-    #[tool(description = "Show git blame attribution for a named Rust symbol using actual commit history. \
+    #[tool(
+        description = "Show git blame attribution for a named Rust symbol using actual commit history. \
         Resolves the symbol to its definition's line range, then runs git blame over that range. \
         Returns per-hunk blame (author, commit, date, message) plus convenience last_author / \
         last_commit_short / last_date fields identifying the most recently committed hunk. \
-        Returns an error if the symbol is not found or the repo has no history.")]
+        Returns an error if the symbol is not found or the repo has no history."
+    )]
     async fn blame_symbol(
         &self,
         Parameters(p): Parameters<BlameSymbolParams>,
@@ -205,11 +212,13 @@ impl GitSenseServer {
     ///
     /// APPROXIMATE: misses dynamic dispatch, trait objects, macros, and any
     /// `pub` item consumed by external crates.  Use as a triage signal, not ground truth.
-    #[tool(description = "Find potentially unused (unreferenced) Rust symbols, enriched with git-history age. \
+    #[tool(
+        description = "Find potentially unused (unreferenced) Rust symbols, enriched with git-history age. \
         APPROXIMATE: misses dynamic dispatch, trait objects, macros, and externally-referenced \
         pub items. include_pub (default false) includes pub items. limit (default 50) caps results. \
         Results sorted: non-pub first, then by days since last git touch (oldest first — safest to delete). \
-        Uses git blame for age; symbols where blame fails appear with null days_since_last_touch.")]
+        Uses git blame for age; symbols where blame fails appear with null days_since_last_touch."
+    )]
     async fn find_dead_code(
         &self,
         Parameters(p): Parameters<FindDeadCodeParams>,
@@ -301,10 +310,12 @@ impl GitSenseServer {
     }
 
     /// High-level repo overview: symbol counts, module list, and hottest files by churn.
-    #[tool(description = "High-level overview of the indexed Rust repo: symbol counts by kind, \
+    #[tool(
+        description = "High-level overview of the indexed Rust repo: symbol counts by kind, \
         module names, and hottest files by git churn (number of commits that touched each file, \
         capped at 500 commits of history). Useful as a starting point for exploring an unfamiliar \
-        codebase or for identifying high-churn areas.")]
+        codebase or for identifying high-churn areas."
+    )]
     async fn repo_overview(
         &self,
         Parameters(_p): Parameters<RepoOverviewParams>,

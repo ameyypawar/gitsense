@@ -6,17 +6,14 @@ use walkdir::WalkDir;
 pub fn collect_rust_files(repo_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
-    for entry in WalkDir::new(repo_root)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            // Skip hidden dirs, target/, and .git/
-            if e.file_type().is_dir() {
-                return name != "target" && name != ".git" && !name.starts_with('.');
-            }
-            true
-        })
-    {
+    for entry in WalkDir::new(repo_root).into_iter().filter_entry(|e| {
+        let name = e.file_name().to_string_lossy();
+        // Skip hidden dirs, target/, and .git/
+        if e.file_type().is_dir() {
+            return name != "target" && name != ".git" && !name.starts_with('.');
+        }
+        true
+    }) {
         let entry = entry?;
         if entry.file_type().is_file() {
             let path = entry.path();

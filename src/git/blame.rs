@@ -16,8 +16,8 @@ pub fn blame_range(
     end_line: usize,
 ) -> anyhow::Result<BlameResult> {
     // ── Open repo ─────────────────────────────────────────────────────────
-    let repo = gix::open(repo_root)
-        .with_context(|| format!("opening repo at {}", repo_root.display()))?;
+    let repo =
+        gix::open(repo_root).with_context(|| format!("opening repo at {}", repo_root.display()))?;
 
     // ── Resolve HEAD ──────────────────────────────────────────────────────
     let head_id = repo

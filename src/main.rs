@@ -14,7 +14,10 @@ use rmcp::ServiceExt;
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "gitsense-mcp", about = "GitSense MCP server — Rust repo analysis with git-history awareness")]
+#[command(
+    name = "gitsense-mcp",
+    about = "GitSense MCP server — Rust repo analysis with git-history awareness"
+)]
 struct Cli {
     /// Path to the Rust repository to analyse.
     #[arg(long, env = "REPO_PATH", default_value = ".")]

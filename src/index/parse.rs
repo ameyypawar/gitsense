@@ -46,11 +46,7 @@ impl RustTagger {
         let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
 
         // Append our reference patterns so generate_tags yields SymbolRef too.
-        let combined_query = format!(
-            "{}\n{}",
-            tree_sitter_rust::TAGS_QUERY,
-            CUSTOM_REFS_QUERY
-        );
+        let combined_query = format!("{}\n{}", tree_sitter_rust::TAGS_QUERY, CUSTOM_REFS_QUERY);
 
         let config = TagsConfiguration::new(language, &combined_query, "")
             .context("failed to build TagsConfiguration for Rust")?;
@@ -87,14 +83,14 @@ impl RustTagger {
                 .to_owned();
 
             // `tag.span` covers the name identifier node; rows/cols are 0-based.
-            let start_row = tag.span.start.row;   // 0-based
+            let start_row = tag.span.start.row; // 0-based
             let start_col = tag.span.start.column; // 0-based
-            let end_row   = tag.span.end.row;      // 0-based
+            let end_row = tag.span.end.row; // 0-based
 
             let location = Location {
                 file: path.to_path_buf(),
                 line: start_row + 1, // 1-based
-                col:  start_col + 1, // 1-based
+                col: start_col + 1,  // 1-based
             };
 
             if tag.is_definition {
@@ -102,12 +98,9 @@ impl RustTagger {
                 // leading whitespace by the tags iterator; check if the line
                 // begins with "pub " or "pub(" (visibility qualifiers).
                 let line_bytes = &source[tag.line_range.clone()];
-                let is_pub = line_bytes.starts_with(b"pub ")
-                    || line_bytes.starts_with(b"pub(");
+                let is_pub = line_bytes.starts_with(b"pub ") || line_bytes.starts_with(b"pub(");
 
-                let kind = kind_from_syntax_name(
-                    self.config.syntax_type_name(tag.syntax_type_id),
-                );
+                let kind = kind_from_syntax_name(self.config.syntax_type_name(tag.syntax_type_id));
 
                 defs.push(SymbolDef {
                     name,
@@ -144,15 +137,15 @@ impl RustTagger {
 /// (non-definition tags) and should never reach this function.
 fn kind_from_syntax_name(name: &str) -> SymbolKind {
     match name {
-        "function"  => SymbolKind::Fn,
-        "method"    => SymbolKind::Method,
+        "function" => SymbolKind::Fn,
+        "method" => SymbolKind::Method,
         // v0: struct/enum/union/type alias all map to @definition.class in
         // tree-sitter-rust's tags.scm, so we can't distinguish them here.
-        "class"     => SymbolKind::Struct,
+        "class" => SymbolKind::Struct,
         "interface" => SymbolKind::Trait,
-        "module"    => SymbolKind::Mod,
-        "macro"     => SymbolKind::Macro,
-        _           => SymbolKind::Other,
+        "module" => SymbolKind::Mod,
+        "macro" => SymbolKind::Macro,
+        _ => SymbolKind::Other,
     }
 }
 
@@ -162,8 +155,7 @@ mod tests {
     use std::path::Path;
 
     /// Three-line snippet exercising all branches of the gate test.
-    const SNIPPET: &[u8] =
-        b"pub fn alpha() { beta(); }\nfn beta() {}\nstruct Thing;\n";
+    const SNIPPET: &[u8] = b"pub fn alpha() { beta(); }\nfn beta() {}\nstruct Thing;\n";
 
     #[test]
     fn gate_test() {

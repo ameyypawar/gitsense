@@ -14,8 +14,8 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::SymbolIndex;
 use crate::index::model::SymbolKind;
+use crate::index::SymbolIndex;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -99,9 +99,10 @@ fn callers_of(index: &SymbolIndex, name: &str) -> Vec<String> {
             continue;
         };
         let (lo, hi) = g.line_range;
-        let calls_name = tags.refs.iter().any(|r| {
-            r.name == name && r.location.line >= lo && r.location.line <= hi
-        });
+        let calls_name = tags
+            .refs
+            .iter()
+            .any(|r| r.name == name && r.location.line >= lo && r.location.line <= hi);
         if calls_name {
             out.push(g.name.clone());
         }
@@ -258,8 +259,10 @@ mod tests {
     /// must terminate and report the cycle.
     #[test]
     fn cycle_safe_and_detected() -> anyhow::Result<()> {
-        let fixture =
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/recursive"));
+        let fixture = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/recursive"
+        ));
         let idx = SymbolIndex::build(fixture)?;
 
         // Sanity: the fixture defs must be present.
@@ -267,10 +270,7 @@ mod tests {
             !idx.definitions("a").is_empty(),
             "fixture def 'a' missing — check tests/fixtures/recursive/recurse.rs"
         );
-        assert!(
-            !idx.definitions("b").is_empty(),
-            "fixture def 'b' missing"
-        );
+        assert!(!idx.definitions("b").is_empty(), "fixture def 'b' missing");
 
         // This call MUST RETURN (not hang). The test finishing proves it.
         let g = build(&idx, "a", 10, Direction::Both);
@@ -294,10 +294,7 @@ mod tests {
         }
 
         // Callees must contain a→b edge.
-        let has_a_to_b = g
-            .callees
-            .iter()
-            .any(|e| e.from == "a" && e.to == "b");
+        let has_a_to_b = g.callees.iter().any(|e| e.from == "a" && e.to == "b");
         assert!(
             has_a_to_b,
             "expected callee edge a→b; callees = {:?}",

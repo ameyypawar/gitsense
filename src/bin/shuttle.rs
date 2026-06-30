@@ -22,8 +22,8 @@
 //! the `GITSENSE_ALLOWED_HOSTS` Shuttle secret (comma-separated hostnames).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use gitsense::{http::build_router, index::SymbolIndex, tools::AppState};
 
@@ -32,8 +32,8 @@ const DEFAULT_CLONE_URL: &str = "https://github.com/dtolnay/anyhow";
 
 #[shuttle_runtime::main]
 async fn shuttle_main() -> shuttle_axum::ShuttleAxum {
-    let clone_url = std::env::var("GITSENSE_CLONE_URL")
-        .unwrap_or_else(|_| DEFAULT_CLONE_URL.to_owned());
+    let clone_url =
+        std::env::var("GITSENSE_CLONE_URL").unwrap_or_else(|_| DEFAULT_CLONE_URL.to_owned());
 
     let target = PathBuf::from("/tmp/gitsense-target");
 
@@ -81,11 +81,7 @@ fn clone_or_reuse(url: &str, target: &Path) -> anyhow::Result<PathBuf> {
         return Ok(target.to_path_buf());
     }
 
-    tracing::info!(
-        "gitsense-shuttle: cloning {} -> {}",
-        url,
-        target.display()
-    );
+    tracing::info!("gitsense-shuttle: cloning {} -> {}", url, target.display());
 
     let interrupt = AtomicBool::new(false);
     let mut prepare = gix::clone::PrepareFetch::new(
@@ -99,8 +95,7 @@ fn clone_or_reuse(url: &str, target: &Path) -> anyhow::Result<PathBuf> {
     let (mut checkout, _fetch_outcome) =
         prepare.fetch_then_checkout(gix::progress::Discard, &interrupt)?;
 
-    let (_repo, _checkout_outcome) =
-        checkout.main_worktree(gix::progress::Discard, &interrupt)?;
+    let (_repo, _checkout_outcome) = checkout.main_worktree(gix::progress::Discard, &interrupt)?;
 
     Ok(target.to_path_buf())
 }

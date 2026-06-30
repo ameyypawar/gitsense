@@ -15,15 +15,14 @@ pub fn last_touched(
     file: &Path,
     line_range: (usize, usize),
 ) -> anyhow::Result<i64> {
-    let result = blame_range(repo_root, file, line_range.0, line_range.1)
-        .with_context(|| {
-            format!(
-                "last_touched: blame failed for '{}' lines {}..={}",
-                file.display(),
-                line_range.0,
-                line_range.1,
-            )
-        })?;
+    let result = blame_range(repo_root, file, line_range.0, line_range.1).with_context(|| {
+        format!(
+            "last_touched: blame failed for '{}' lines {}..={}",
+            file.display(),
+            line_range.0,
+            line_range.1,
+        )
+    })?;
     Ok(result.last_timestamp)
 }
 
@@ -51,15 +50,12 @@ pub fn last_touched(
 ///
 /// Pairs `(file, count)` sorted by count descending.  Files with zero commits
 /// in the walked range are omitted.
-pub fn file_churn(
-    repo_root: &Path,
-    files: &[PathBuf],
-) -> anyhow::Result<Vec<(PathBuf, usize)>> {
+pub fn file_churn(repo_root: &Path, files: &[PathBuf]) -> anyhow::Result<Vec<(PathBuf, usize)>> {
     // Cap the revwalk to bound latency on large repositories.
     const COMMIT_CAP: usize = 500;
 
-    let repo = gix::open(repo_root)
-        .with_context(|| format!("opening repo at {}", repo_root.display()))?;
+    let repo =
+        gix::open(repo_root).with_context(|| format!("opening repo at {}", repo_root.display()))?;
 
     let head_commit = match repo.head_commit() {
         Ok(c) => c,
@@ -114,24 +110,14 @@ pub fn file_churn(
             // Look up the blob OID in this commit's tree.
             let current_oid = commit_tree
                 .lookup_entry_by_path(rel_path)
-                .with_context(|| {
-                    format!(
-                        "looking up '{}' in commit tree",
-                        rel_path.display()
-                    )
-                })?
+                .with_context(|| format!("looking up '{}' in commit tree", rel_path.display()))?
                 .map(|e| e.object_id());
 
             // Look up the blob OID in the parent's tree.
             let parent_oid = match &parent_tree_opt {
                 Some(pt) => pt
                     .lookup_entry_by_path(rel_path)
-                    .with_context(|| {
-                        format!(
-                            "looking up '{}' in parent tree",
-                            rel_path.display()
-                        )
-                    })?
+                    .with_context(|| format!("looking up '{}' in parent tree", rel_path.display()))?
                     .map(|e| e.object_id()),
                 None => None,
             };
@@ -144,6 +130,6 @@ pub fn file_churn(
 
     // Sort by count descending.
     let mut result: Vec<(PathBuf, usize)> = counts.into_iter().collect();
-    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result.sort_by_key(|b| std::cmp::Reverse(b.1));
     Ok(result)
 }

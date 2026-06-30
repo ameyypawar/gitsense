@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 
 use crate::tools::{AppState, GitSenseServer};

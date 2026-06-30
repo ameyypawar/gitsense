@@ -118,10 +118,9 @@ impl SymbolIndex {
         self.all_defs
             .iter()
             .filter(|def| {
-                let name_ok = name_substr.map_or(true, |substr| {
-                    def.name.to_lowercase().contains(&substr.to_lowercase())
-                });
-                let kind_ok = kind.as_ref().map_or(true, |k| &def.kind == k);
+                let name_ok = name_substr
+                    .is_none_or(|substr| def.name.to_lowercase().contains(&substr.to_lowercase()));
+                let kind_ok = kind.as_ref().is_none_or(|k| &def.kind == k);
                 name_ok && kind_ok
             })
             .collect()
@@ -175,7 +174,7 @@ impl SymbolIndex {
             *kind_counts.entry(format!("{:?}", def.kind)).or_insert(0) += 1;
         }
         let mut by_kind: Vec<(String, usize)> = kind_counts.into_iter().collect();
-        by_kind.sort_by(|a, b| b.1.cmp(&a.1));
+        by_kind.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Prefer Mod-kind def names; fall back to file stems.
         let modules: Vec<String> = {

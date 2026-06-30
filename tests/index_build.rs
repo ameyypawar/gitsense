@@ -9,10 +9,7 @@ fn build_indexes_own_repo() {
 
     let stats = idx.stats();
 
-    assert!(
-        stats.def_count > 0,
-        "expected at least one def, got 0"
-    );
+    assert!(stats.def_count > 0, "expected at least one def, got 0");
     assert!(
         stats.file_count >= 3,
         "expected >= 3 files parsed, got {}",

@@ -7,8 +7,10 @@ use gitsense::index::SymbolIndex;
 /// recursive fixture, reports the a↔b cycle, and emits the a→b callee edge.
 #[test]
 fn call_graph_cycle_safe() -> anyhow::Result<()> {
-    let fixture =
-        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/recursive"));
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/recursive"
+    ));
     let idx = SymbolIndex::build(fixture)?;
 
     // MUST RETURN — finishing the test proves no infinite loop.
