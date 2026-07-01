@@ -117,7 +117,7 @@ impl RustTagger {
         // Language conversion here (a static fn-pointer, negligible cost) so
         // that `self.body_query` can be borrowed immutably at the same time as
         // `self.ctx` is borrowed mutably in the tags pass below.
-        let body_ranges: Vec<(usize, usize, usize, usize)> = {
+        let body_ranges: Vec<(usize, usize, usize, usize, &'static str)> = {
             let body_lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
             let mut body_parser = tree_sitter::Parser::new();
             body_parser
@@ -132,7 +132,14 @@ impl RustTagger {
             // trait (tree_sitter::StreamingIterator) for the advance/get loop.
             use tree_sitter::StreamingIterator as _;
             let mut cursor = tree_sitter::QueryCursor::new();
-            let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
+            // Fifth element is the node's exact grammar kind (e.g.
+            // "struct_item", "enum_item").  `Node::kind()` returns
+            // `&'static str` (tied to the Language's static tables, not the
+            // tree), so it safely outlives the `tree`/`cursor` dropped at
+            // the end of this block.  Used by `refine_kind` (#8) to
+            // distinguish struct/enum/trait/mod/macro definitions that
+            // tags.scm alone collapses together.
+            let mut ranges: Vec<(usize, usize, usize, usize, &'static str)> = Vec::new();
             let mut qm = cursor.matches(
                 &self.body_query,
                 tree.root_node(),
@@ -146,6 +153,7 @@ impl RustTagger {
                         n.end_byte(),
                         n.start_position().row,
                         n.end_position().row,
+                        n.kind(),
                     ));
                 }
             }
@@ -188,7 +196,8 @@ impl RustTagger {
                 let line_bytes = &source[tag.line_range.clone()];
                 let is_pub = line_bytes.starts_with(b"pub ") || line_bytes.starts_with(b"pub(");
 
-                let kind = kind_from_syntax_name(self.config.syntax_type_name(tag.syntax_type_id));
+                let tags_kind =
+                    kind_from_syntax_name(self.config.syntax_type_name(tag.syntax_type_id));
 
                 // Find the smallest body-range node that contains the name span.
                 // The name_range bytes must fall entirely within the node.
@@ -197,12 +206,18 @@ impl RustTagger {
                 // the enclosing impl_item).
                 let name_start = tag.name_range.start;
                 let name_end = tag.name_range.end;
-                let (body_start_row, body_end_row) = body_ranges
+                let (body_start_row, body_end_row, enclosing_kind) = body_ranges
                     .iter()
-                    .filter(|(bs, be, _, _)| *bs <= name_start && name_end <= *be)
-                    .min_by_key(|(bs, be, _, _)| be - bs)
-                    .map(|&(_, _, sr, er)| (sr, er))
-                    .unwrap_or((start_row, start_row)); // fallback: single-line
+                    .filter(|(bs, be, _, _, _)| *bs <= name_start && name_end <= *be)
+                    .min_by_key(|(bs, be, _, _, _)| be - bs)
+                    .map(|&(_, _, sr, er, k)| (sr, er, Some(k)))
+                    .unwrap_or((start_row, start_row, None)); // fallback: single-line
+
+                // #8 Part A: refine the coarse tags-based kind using the
+                // enclosing item node's exact grammar kind — this is what
+                // lets `enum` be distinguished from `struct` (tags.scm's
+                // "class" capture collapses struct/enum/union/type-alias).
+                let kind = refine_kind(tags_kind, enclosing_kind);
 
                 defs.push(SymbolDef {
                     name,
@@ -229,10 +244,21 @@ impl RustTagger {
 /// |--------------|-----------------------------------------------|
 /// | "function"   | `fn` at module/file scope                     |
 /// | "method"     | `fn` inside a `declaration_list` (impl block) |
-/// | "class"      | `struct`, `enum`, `union`, type alias (v0: all → Struct) |
+/// | "class"      | `struct`, `enum`, `union`, type alias (all collapse here) |
 /// | "interface"  | `trait`                                        |
 /// | "module"     | `mod`                                          |
 /// | "macro"      | `macro_definition`                             |
+///
+/// This is the coarse, tags-only classification. `extract()` passes the
+/// result through `refine_kind` (#8), which uses the enclosing item node's
+/// exact grammar kind (from the `BODY_RANGE_QUERY` pass) to tell `struct`
+/// apart from `enum` — the one case above that actually needs
+/// disambiguating for the `search_symbols` kind filter (union/type-alias
+/// stay folded into `Struct`; nothing advertises separate filters for
+/// them). `const_item` and `impl_item` never appear in this table at all:
+/// tags.scm has no `@definition.*` capture for either, so const/impl
+/// definitions are never produced — `parse_kind` (tools/mod.rs) does not
+/// accept those kind strings.
 ///
 /// Reference captures use kind "call"; those are already routed as `SymbolRef`
 /// (non-definition tags) and should never reach this function.
@@ -240,13 +266,45 @@ fn kind_from_syntax_name(name: &str) -> SymbolKind {
     match name {
         "function" => SymbolKind::Fn,
         "method" => SymbolKind::Method,
-        // v0: struct/enum/union/type alias all map to @definition.class in
-        // tree-sitter-rust's tags.scm, so we can't distinguish them here.
+        // Struct is the default for "class"; `refine_kind` upgrades this to
+        // `Enum` when the enclosing node is actually an `enum_item`.
         "class" => SymbolKind::Struct,
         "interface" => SymbolKind::Trait,
         "module" => SymbolKind::Mod,
         "macro" => SymbolKind::Macro,
         _ => SymbolKind::Other,
+    }
+}
+
+/// Refine a coarse tags-based `SymbolKind` using the smallest enclosing
+/// item node's exact tree-sitter grammar kind (from the `BODY_RANGE_QUERY`
+/// pass in `extract()`).
+///
+/// `Fn`/`Method` are passed through unchanged: tags.scm already
+/// distinguishes them correctly (top-level `fn` vs. one nested in a
+/// `declaration_list`), and a method's enclosing node is *also*
+/// `function_item` — node kind alone can't tell a function from a method,
+/// so this must not try.
+///
+/// For every other tags kind, the enclosing node's grammar kind decides:
+/// `struct_item` → `Struct`, `enum_item` → `Enum`, `trait_item` → `Trait`,
+/// `mod_item` → `Mod`, `macro_definition` → `Macro`. This is what lets
+/// `enum` escape the "class" collapse (`struct`/`enum`/`union`/type-alias
+/// all tag as "class" — see `kind_from_syntax_name`). `enclosing_node_kind`
+/// is `None` only when no `BODY_RANGE_QUERY` node contains the name span
+/// (shouldn't happen for any kind in that query's list); the original
+/// tags-based kind is kept as the fallback either way.
+fn refine_kind(tags_kind: SymbolKind, enclosing_node_kind: Option<&str>) -> SymbolKind {
+    if matches!(tags_kind, SymbolKind::Fn | SymbolKind::Method) {
+        return tags_kind;
+    }
+    match enclosing_node_kind {
+        Some("struct_item") => SymbolKind::Struct,
+        Some("enum_item") => SymbolKind::Enum,
+        Some("trait_item") => SymbolKind::Trait,
+        Some("mod_item") => SymbolKind::Mod,
+        Some("macro_definition") => SymbolKind::Macro,
+        _ => tags_kind,
     }
 }
 
@@ -373,6 +431,39 @@ mod tests {
             refs.iter().any(|r| r.name == "make"),
             "path call S::make() not captured; refs = {:?}",
             refs.iter().map(|r| &r.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// Fix #8 Part A: enum must be distinguished from struct via the
+    /// enclosing item-node kind — tags.scm's "class" capture alone can't
+    /// tell them apart (struct_item/enum_item/union_item/type_item all
+    /// collapse to "class").
+    #[test]
+    fn enum_distinguished_from_struct() {
+        let src = b"struct Widget;\nenum Shape { Circle, Square }\n";
+        let mut tagger = RustTagger::new().expect("RustTagger::new failed");
+        let (defs, _) = tagger
+            .extract(src, Path::new("kinds.rs"))
+            .expect("extract failed");
+
+        let widget = defs
+            .iter()
+            .find(|d| d.name == "Widget")
+            .expect("def 'Widget' missing");
+        assert!(
+            matches!(widget.kind, SymbolKind::Struct),
+            "Widget: expected Struct, got {:?}",
+            widget.kind
+        );
+
+        let shape = defs
+            .iter()
+            .find(|d| d.name == "Shape")
+            .expect("def 'Shape' missing");
+        assert!(
+            matches!(shape.kind, SymbolKind::Enum),
+            "Shape: expected Enum, got {:?}",
+            shape.kind
         );
     }
 }

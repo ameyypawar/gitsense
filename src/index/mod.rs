@@ -17,6 +17,26 @@ pub struct FileTags {
     pub refs: Vec<SymbolRef>,
 }
 
+/// Outcome of resolving a symbol name (+ optional `file`/`line`
+/// disambiguator) to a specific definition (#8).
+///
+/// Common names (`new`, `from`, `fmt`) collide across types/modules; this
+/// forces callers (`blame_symbol`, `call_graph`) to either be unambiguous
+/// or explicitly disambiguate, instead of silently picking one.
+#[derive(Debug)]
+pub enum SymbolResolution<'a> {
+    /// No definition named `name` exists in the index.
+    NotFound,
+    /// Exactly one definition matches — either `name` was unique, or
+    /// `file`/`line` narrowed multiple candidates down to one.
+    Resolved(&'a SymbolDef),
+    /// Multiple definitions share `name` and the given `file`/`line` (if
+    /// any) did not narrow them to a single candidate. Holds the narrowed
+    /// candidate set when `file` matched more than one def, otherwise the
+    /// full set of same-named defs.
+    Ambiguous(Vec<&'a SymbolDef>),
+}
+
 /// Aggregate statistics returned by [`SymbolIndex::stats`].
 #[derive(Debug, Serialize)]
 pub struct RepoStats {
@@ -150,6 +170,56 @@ impl SymbolIndex {
             .iter()
             .filter(|def| !self.refs_by_name.contains_key(&def.name))
             .collect()
+    }
+
+    /// Resolve `name` to a specific definition, optionally narrowed by a
+    /// `file` path suffix (matched component-wise against the definition's
+    /// path, e.g. `"src/foo.rs"` or just `"foo.rs"`) and/or a `line` that
+    /// must fall within the definition's `line_range` (#8).
+    ///
+    /// Rules:
+    /// - No defs named `name` → [`SymbolResolution::NotFound`].
+    /// - Exactly one def named `name` → [`SymbolResolution::Resolved`],
+    ///   regardless of `file`/`line`.
+    /// - Multiple defs named `name`:
+    ///   - `file` given: keep only defs whose path ends with it (and, if
+    ///     `line` is also given, whose `line_range` contains it). Exactly
+    ///     one survivor → `Resolved`; zero → fall back to the full
+    ///     candidate set as `Ambiguous`; more than one → `Ambiguous` with
+    ///     just the narrowed set.
+    ///   - `file` not given → `Ambiguous` with the full candidate set.
+    ///     `line` alone (without `file`) is not used to disambiguate.
+    pub fn resolve_symbol(
+        &self,
+        name: &str,
+        file: Option<&str>,
+        line: Option<usize>,
+    ) -> SymbolResolution<'_> {
+        let defs = self.definitions(name);
+        if defs.is_empty() {
+            return SymbolResolution::NotFound;
+        }
+        if defs.len() == 1 {
+            return SymbolResolution::Resolved(&defs[0]);
+        }
+
+        let Some(file) = file else {
+            return SymbolResolution::Ambiguous(defs.iter().collect());
+        };
+
+        let narrowed: Vec<&SymbolDef> = defs
+            .iter()
+            .filter(|d| {
+                d.location.file.ends_with(file)
+                    && line.is_none_or(|ln| ln >= d.line_range.0 && ln <= d.line_range.1)
+            })
+            .collect();
+
+        match narrowed.len() {
+            1 => SymbolResolution::Resolved(narrowed[0]),
+            0 => SymbolResolution::Ambiguous(defs.iter().collect()),
+            _ => SymbolResolution::Ambiguous(narrowed),
+        }
     }
 
     /// Per-file tags accessor used by the Phase 5 call-graph builder.

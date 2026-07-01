@@ -24,10 +24,10 @@ gitsense is a single-binary MCP server that gives AI agents structural and histo
 
 | Tool | What it does | Example question |
 |------|-------------|-----------------|
-| `search_symbols` | Case-insensitive substring search over all Rust symbol definitions (fn, method, struct, enum, trait, impl, mod, const, macro). | "Find all types named `Context`." |
+| `search_symbols` | Case-insensitive substring search over all Rust symbol definitions (fn, method, struct, enum, trait, mod, macro). | "Find all types named `Context`." |
 | `find_references` | Every call-site reference to a named symbol captured by tree-sitter. | "Where is `blame_range` called?" |
-| `call_graph` | Caller/callee graph rooted at a function, up to `max_hops` deep with cycle detection. Name-based — results are approximate. | "What calls `build_router` and what does it call?" |
-| **`blame_symbol`** | **Resolves a symbol to its line range, runs `gix` blame over that range, and returns per-hunk attribution (author, commit hash, date, message) plus a `last_author`/`last_date` summary. Blame always reflects the last *committed* version of the file (HEAD) — a `worktree_dirty: true` flag on the response means the file has uncommitted changes on disk, so line numbers/attribution may not line up with what you're currently editing.** | "Who last touched `SymbolIndex::build` and in which commit?" |
+| `call_graph` | Caller/callee graph rooted at a function, up to `max_hops` deep with cycle detection. Root is disambiguated by optional `file`/`line` when the name collides; deeper hops stay name-based — results are approximate. | "What calls `build_router` and what does it call?" |
+| **`blame_symbol`** | **Resolves a symbol to its line range, runs `gix` blame over that range, and returns per-hunk attribution (author, commit hash, date, message) plus a `last_author`/`last_date` summary. Blame always reflects the last *committed* version of the file (HEAD) — a `worktree_dirty: true` flag on the response means the file has uncommitted changes on disk, so line numbers/attribution may not line up with what you're currently editing. Optional `file`/`line` disambiguate when multiple definitions share a name (e.g. `new`) — an ambiguous name with neither returns the candidate list instead of guessing.** | "Who last touched `SymbolIndex::build` and in which commit?" |
 | **`find_dead_code`** | **Finds unreferenced symbols, then ranks them by `days_since_last_touch` (oldest first — safest to delete). Non-pub items surfaced first.** | "What functions can I safely delete? Sort by how long they've been untouched." |
 | `repo_overview` | Symbol counts by kind, module list, and hottest files by commit churn (capped at 500 commits). | "Give me a high-level map of this repo." |
 
@@ -241,7 +241,7 @@ Prefer small crates (< a few thousand commits) for the Shuttle free tier (0.5 GB
 ## Limitations (v0)
 
 - **Rust only.** tree-sitter-tags language files for Python, TypeScript, Go are planned but not yet wired. v0 is intentionally single-language.
-- **Approximate call graph.** Name-based resolution — overloads, closures, and macro-expanded calls may be mis-attributed or missing.
+- **Approximate call graph.** Name-based resolution — overloads, closures, and macro-expanded calls may be mis-attributed or missing. The graph's root is disambiguated by optional `file`/`line` when the name collides (an ambiguous root with neither returns the candidate list instead of guessing); deeper hops in the traversal are still resolved by name only.
 - **Approximate dead code.** `find_dead_code` misses dynamic dispatch (trait objects), macro-generated items, and `pub` items consumed by external crates. Treat it as a triage signal, not a guarantee.
 - **File churn simplified.** `repo_overview` walks first-parent only, capped at 500 commits, with no rename tracking.
 - **Demo-repo scale.** The Shuttle deployment is designed for small-to-medium crates. Mono-repos or crates with tens of thousands of commits will hit the 0.5 GB RAM ceiling.

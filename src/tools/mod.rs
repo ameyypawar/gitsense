@@ -12,8 +12,8 @@ use rmcp::{
 use serde::Serialize;
 
 use crate::graph::{self, Direction};
-use crate::index::model::SymbolKind;
-use crate::index::SymbolIndex;
+use crate::index::model::{SymbolDef, SymbolKind};
+use crate::index::{SymbolIndex, SymbolResolution};
 
 use params::{
     BlameSymbolParams, CallGraphParams, FindDeadCodeParams, FindReferencesParams,
@@ -55,6 +55,12 @@ fn to_mcp_err(e: anyhow::Error) -> ErrorData {
 
 // ── Kind string → SymbolKind ──────────────────────────────────────────────────
 
+// #8: `impl` and `const` are intentionally NOT accepted here — tree-sitter-
+// rust's tags query never emits a named `@definition.*` tag for `impl_item`
+// or `const_item`, so those filters would always return zero results. Every
+// string accepted below must correspond to a `SymbolKind` the indexer can
+// actually produce (see `kind_from_syntax_name` / `refine_kind` in
+// `index/parse.rs`).
 fn parse_kind(s: &str) -> Option<SymbolKind> {
     match s.to_lowercase().as_str() {
         "fn" => Some(SymbolKind::Fn),
@@ -62,9 +68,7 @@ fn parse_kind(s: &str) -> Option<SymbolKind> {
         "struct" => Some(SymbolKind::Struct),
         "enum" => Some(SymbolKind::Enum),
         "trait" => Some(SymbolKind::Trait),
-        "impl" => Some(SymbolKind::Impl),
         "mod" => Some(SymbolKind::Mod),
-        "const" => Some(SymbolKind::Const),
         "macro" => Some(SymbolKind::Macro),
         "other" => Some(SymbolKind::Other),
         _ => None,
@@ -89,6 +93,66 @@ fn json_result<T: Serialize>(val: &T) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
+// ── Name-collision candidate response (#8) ────────────────────────────────────
+
+/// One same-named candidate definition, as surfaced to the caller when a
+/// name resolves ambiguously.
+#[derive(Serialize)]
+struct SymbolCandidate {
+    name: String,
+    kind: String,
+    file: String,
+    line: usize,
+}
+
+impl SymbolCandidate {
+    fn from_def(index: &SymbolIndex, def: &SymbolDef) -> Self {
+        SymbolCandidate {
+            name: def.name.clone(),
+            kind: format!("{:?}", def.kind),
+            file: def
+                .location
+                .file
+                .strip_prefix(&index.repo_root)
+                .unwrap_or(&def.location.file)
+                .to_string_lossy()
+                .into_owned(),
+            line: def.location.line,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AmbiguousSymbolResponse {
+    message: String,
+    candidates: Vec<SymbolCandidate>,
+}
+
+/// Build a `CallToolResult` listing multiple same-named candidates (#8),
+/// telling the caller to pass `file`/`line` to disambiguate rather than
+/// having `blame_symbol`/`call_graph` guess among them.
+fn ambiguous_result(name: &str, index: &SymbolIndex, candidates: &[&SymbolDef]) -> CallToolResult {
+    let body = AmbiguousSymbolResponse {
+        message: format!(
+            "multiple symbols named '{}'; pass file (and optionally line) to disambiguate",
+            name
+        ),
+        candidates: candidates
+            .iter()
+            .map(|d| SymbolCandidate::from_def(index, d))
+            .collect(),
+    };
+
+    let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| {
+        format!(
+            "multiple symbols named '{}'; pass file (and optionally line) to disambiguate",
+            name
+        )
+    });
+
+    CallToolResult::error(vec![Content::text(text)])
+}
+
 // ── Tool implementations ──────────────────────────────────────────────────────
 
 #[tool_router]
@@ -96,17 +160,22 @@ impl GitSenseServer {
     /// Search for symbols by name and/or kind across the indexed Rust repo.
     ///
     /// Performs a case-insensitive substring match on symbol names and an
-    /// optional exact kind filter.  Note: struct/enum/type-alias nodes are all
-    /// tagged as `Struct` by tree-sitter-tags — filter by `struct` to reach
-    /// all of them.
+    /// optional exact kind filter.  `enum` is distinguished from `struct` via
+    /// the enclosing item node; union/type-alias nodes still surface as
+    /// `struct` (no dedicated filter for those). `impl` and `const` are not
+    /// offered as filters: tree-sitter-rust's tags query never emits a named
+    /// definition tag for `impl` blocks or `const` items, so those filters
+    /// would always return empty (#8).
     ///
-    /// Accepted `kind` values: fn | method | struct | enum | trait | impl | mod
-    /// | const | macro | other.
+    /// Accepted `kind` values: fn | method | struct | enum | trait | mod |
+    /// macro | other.
     #[tool(
         description = "Search for symbols by name substring and/or kind in the indexed Rust repo. \
         Case-insensitive name match. Accepted kind values: fn | method | struct | enum | trait | \
-        impl | mod | const | macro | other. Note: struct/enum/type-alias nodes all tag as 'Struct' \
-        (tree-sitter-tags limitation). Returns definitions with file, line, visibility, and docs."
+        mod | macro | other. Note: union/type-alias definitions surface as 'struct'; 'enum' is \
+        distinguished from 'struct' via the enclosing item node. 'impl' and 'const' are not \
+        filterable — tree-sitter-rust never emits named definition tags for them. \
+        Returns definitions with file, line, visibility, and docs."
     )]
     async fn search_symbols(
         &self,
@@ -137,16 +206,28 @@ impl GitSenseServer {
 
     /// Build a call graph rooted at a function or method.
     ///
-    /// CAVEAT: name-based resolution — overloads, closures, and
+    /// The root is resolved via `SymbolIndex::resolve_symbol` (#8): a unique
+    /// `name` resolves directly; an ambiguous `name` without `file`/`line`
+    /// returns the candidate list instead of guessing. Once resolved, the
+    /// root's own callees are scoped to that exact definition
+    /// (`graph::build_rooted_at`); deeper hops in the traversal still
+    /// resolve purely by name.
+    ///
+    /// CAVEAT: name-based resolution past the root — overloads, closures, and
     /// macro-expanded calls may be mis-attributed.  Results are approximate.
     /// Runs on a blocking-task thread since BFS traversal is CPU-bound.
     #[tool(
         description = "Build a call graph rooted at a Rust function or method. \
         direction: callees | callers | both (default: both). max_hops default: 3, \
         hard-capped at 32 regardless of the requested value. \
-        CAVEAT: name-based resolution — overloads, closures, and macro-expanded calls may \
-        be mis-attributed or missing. Cycles are detected and reported. Graph may be truncated \
-        when max_hops is reached."
+        When multiple definitions share `name`, pass `file` (and optionally `line`) to pick the \
+        root; without a disambiguator, an ambiguous name returns the candidate list instead of \
+        guessing. Once resolved, the ROOT's callees are scoped to that exact definition, but \
+        deeper nodes in the traversal still resolve callees/callers by name — a same-named \
+        sibling elsewhere in the repo can still be conflated at depth >= 2. \
+        CAVEAT: name-based resolution past the root — overloads, closures, and macro-expanded \
+        calls may be mis-attributed or missing. Cycles are detected and reported. Graph may be \
+        truncated when max_hops is reached."
     )]
     async fn call_graph(
         &self,
@@ -164,10 +245,25 @@ impl GitSenseServer {
         let max_hops = p.max_hops.unwrap_or(3).min(MAX_HOPS);
         let name = p.name.clone();
 
-        let result =
-            tokio::task::spawn_blocking(move || graph::build(&index, &name, max_hops, direction))
-                .await
-                .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?;
+        // #8: disambiguate the root before building. NotFound keeps the old
+        // by-name path (graph::build already handles an unknown name as an
+        // empty graph); Ambiguous returns candidates instead of guessing;
+        // Resolved seeds BFS at that exact definition.
+        let resolved: Option<SymbolDef> =
+            match index.resolve_symbol(&name, p.file.as_deref(), p.line) {
+                SymbolResolution::NotFound => None,
+                SymbolResolution::Ambiguous(candidates) => {
+                    return Ok(ambiguous_result(&name, &index, &candidates));
+                }
+                SymbolResolution::Resolved(def) => Some(def.clone()),
+            };
+
+        let result = tokio::task::spawn_blocking(move || match resolved {
+            Some(def) => graph::build_rooted_at(&index, &def, max_hops, direction),
+            None => graph::build(&index, &name, max_hops, direction),
+        })
+        .await
+        .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?;
         json_result(&result)
     }
 
@@ -179,6 +275,10 @@ impl GitSenseServer {
     /// Blame always runs against HEAD, never the on-disk worktree (#6) — the
     /// `worktree_dirty` field on the response flags when the file has
     /// uncommitted changes, so callers know when line numbers may be stale.
+    ///
+    /// Resolved via `SymbolIndex::resolve_symbol` (#8): an ambiguous `name`
+    /// with no `file`/`line` returns the candidate list instead of blaming
+    /// an arbitrary same-named definition.
     #[tool(
         description = "Show git blame attribution for a named Rust symbol using actual commit history. \
         Resolves the symbol to its definition's line range, then runs git blame over that range. \
@@ -188,6 +288,9 @@ impl GitSenseServer {
         on-disk edits. The response includes worktree_dirty: true when the file has uncommitted \
         changes (or is untracked), meaning line numbers/attribution may not match what's currently \
         on disk — re-run after committing for accurate line numbers. \
+        When multiple definitions share `name` (e.g. `new`, `from`, `fmt` on different types), \
+        pass `file` (and optionally `line`) to disambiguate; otherwise the response lists the \
+        candidates instead of blaming an arbitrary one. \
         Returns an error if the symbol is not found or the repo has no history."
     )]
     async fn blame_symbol(
@@ -198,19 +301,20 @@ impl GitSenseServer {
         let repo_root = self.state.repo_root.clone();
         let name = p.name.clone();
 
-        // Resolve to first Fn/Method def; fall back to any def.
-        let defs = index.definitions(&name);
-        if defs.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "no symbol named '{}' found in the index",
-                name
-            ))]));
-        }
-        let def = defs
-            .iter()
-            .find(|d| matches!(d.kind, SymbolKind::Fn | SymbolKind::Method))
-            .unwrap_or(&defs[0])
-            .clone();
+        // #8: resolve by name + optional file/line instead of picking an
+        // arbitrary same-named definition.
+        let def = match index.resolve_symbol(&name, p.file.as_deref(), p.line) {
+            SymbolResolution::NotFound => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "no symbol named '{}' found in the index",
+                    name
+                ))]));
+            }
+            SymbolResolution::Ambiguous(candidates) => {
+                return Ok(ambiguous_result(&name, &index, &candidates));
+            }
+            SymbolResolution::Resolved(def) => def.clone(),
+        };
 
         // Convert file to repo-relative path for git blame.
         let file_rel = def
@@ -440,5 +544,25 @@ mod tests {
         ));
         assert!(!err.message.contains("/tmp/gitsense-target"));
         assert!(!err.message.contains("secret"));
+    }
+
+    /// #8 Part A: every kind string `parse_kind` accepts must correspond to
+    /// a `SymbolKind` the indexer can actually produce; `impl`/`const` must
+    /// be removed rather than advertise a filter that always returns empty.
+    #[test]
+    fn parse_kind_drops_unproducible_kinds() {
+        assert_eq!(parse_kind("enum"), Some(SymbolKind::Enum));
+        assert_eq!(parse_kind("struct"), Some(SymbolKind::Struct));
+        assert_eq!(parse_kind("trait"), Some(SymbolKind::Trait));
+        assert_eq!(
+            parse_kind("impl"),
+            None,
+            "'impl' must be unaccepted — impl_item is never a definition tag"
+        );
+        assert_eq!(
+            parse_kind("const"),
+            None,
+            "'const' must be unaccepted — const_item is never a definition tag"
+        );
     }
 }

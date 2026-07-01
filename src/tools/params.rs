@@ -12,16 +12,19 @@ use serde::Deserialize;
 /// Parameters for `search_symbols`.
 ///
 /// Accepted `kind` strings (case-insensitive prefix match not required — must
-/// be one of): `fn`, `method`, `struct`, `enum`, `trait`, `impl`, `mod`,
-/// `const`, `macro`, `other`.
+/// be one of): `fn`, `method`, `struct`, `enum`, `trait`, `mod`, `macro`,
+/// `other`.
 ///
-/// Note: tree-sitter-tags reports struct/enum/type-aliases all as `Struct`; the
-/// `kind` filter reflects the internal tag, not the Rust syntax keyword.
+/// Note: `enum` is distinguished from `struct` via the enclosing item node;
+/// union/type-alias definitions still surface as `struct`. `impl` and
+/// `const` are NOT accepted — tree-sitter-rust's tags query never emits a
+/// named definition tag for `impl` blocks or `const` items, so those
+/// filters would always return empty (#8).
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchSymbolsParams {
     /// Optional case-insensitive substring to match against symbol names.
     pub name: Option<String>,
-    /// Optional exact kind filter: fn | method | struct | enum | trait | impl | mod | const | macro | other.
+    /// Optional exact kind filter: fn | method | struct | enum | trait | mod | macro | other.
     pub kind: Option<String>,
 }
 
@@ -45,6 +48,14 @@ pub struct CallGraphParams {
     pub max_hops: Option<usize>,
     /// Direction: `callees` | `callers` | `both`.  Defaults to `both`.
     pub direction: Option<String>,
+    /// Optional file path (matched against the end of the definition's
+    /// path, e.g. `"src/foo.rs"` or just `"foo.rs"`) to disambiguate the
+    /// root when multiple definitions share `name` (#8).
+    pub file: Option<String>,
+    /// Optional line number (1-based) to further disambiguate the root;
+    /// must fall within the candidate definition's line range. Only
+    /// consulted together with `file`.
+    pub line: Option<usize>,
 }
 
 // ── blame_symbol ──────────────────────────────────────────────────────────────
@@ -54,6 +65,14 @@ pub struct CallGraphParams {
 pub struct BlameSymbolParams {
     /// Exact symbol name to look up blame information for.
     pub name: String,
+    /// Optional file path (matched against the end of the definition's
+    /// path, e.g. `"src/foo.rs"` or just `"foo.rs"`) to disambiguate when
+    /// multiple definitions share `name` (#8).
+    pub file: Option<String>,
+    /// Optional line number (1-based) to further disambiguate; must fall
+    /// within the candidate definition's line range. Only consulted
+    /// together with `file`.
+    pub line: Option<usize>,
 }
 
 // ── find_dead_code ────────────────────────────────────────────────────────────

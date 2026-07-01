@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::index::model::SymbolKind;
+use crate::index::model::{SymbolDef, SymbolKind};
 use crate::index::SymbolIndex;
 
 // ── Public types ─────────────────────────────────────────────────────────────
@@ -74,6 +74,35 @@ fn callees_of(index: &SymbolIndex, name: &str) -> Vec<String> {
             if ln >= lo && ln <= hi && !index.definitions(&r.name).is_empty() {
                 out.push(r.name.clone());
             }
+        }
+    }
+
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Names that a specific definition (identified by exact location, not
+/// just name) calls.
+///
+/// Same logic as [`callees_of`] but scoped to one `SymbolDef` instead of
+/// unioned across every def sharing its name — used to seed BFS at a
+/// disambiguated root (#8) so a same-named sibling elsewhere in the repo
+/// doesn't leak callee edges into the root's own depth-1 expansion.
+fn callees_of_def(index: &SymbolIndex, def: &SymbolDef) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+
+    if !is_fn_like(&def.kind) {
+        return out;
+    }
+    let Some(tags) = index.file_tags(&def.location.file) else {
+        return out;
+    };
+    let (lo, hi) = def.line_range;
+    for r in &tags.refs {
+        let ln = r.location.line;
+        if ln >= lo && ln <= hi && !index.definitions(&r.name).is_empty() {
+            out.push(r.name.clone());
         }
     }
 
@@ -158,15 +187,17 @@ fn find_cycle(
 /// neighbours enqueued at `depth + 1`); if the node sits exactly at
 /// `max_hops`, its neighbours are only checked for emptiness, to set
 /// `truncated` without expanding further.
-fn bfs_expand(
+fn bfs_expand<F>(
     index: &SymbolIndex,
     root: &str,
     max_hops: usize,
     edges: &mut Vec<CallEdge>,
     cycles: &mut Vec<Vec<String>>,
     truncated: &mut bool,
-    neighbor_fn: fn(&SymbolIndex, &str) -> Vec<String>,
-) {
+    neighbor_fn: F,
+) where
+    F: Fn(&SymbolIndex, &str) -> Vec<String>,
+{
     let mut visited: HashMap<String, usize> = HashMap::from([(root.to_string(), 0)]);
     let mut parent: HashMap<String, String> = HashMap::new();
     let mut queue: VecDeque<String> = VecDeque::from([root.to_string()]);
@@ -248,6 +279,73 @@ pub fn build(
         bfs_expand(
             index,
             symbol,
+            max_hops,
+            &mut result.callers,
+            &mut result.cycles_detected,
+            &mut result.truncated,
+            callers_of,
+        );
+    }
+
+    // Both directions may discover the same cycle; deduplicate.
+    result.cycles_detected.sort();
+    result.cycles_detected.dedup();
+
+    result
+}
+
+/// Build a call-graph rooted at a specific, already-disambiguated
+/// definition rather than a bare name (#8).
+///
+/// The root's own callees are scoped to `def`'s exact file + `line_range`
+/// (via [`callees_of_def`]) — a same-named sibling definition elsewhere in
+/// the repo contributes no depth-1 edges here. Callers of the root, and
+/// both directions at every deeper hop, still resolve purely by name
+/// (there is no callee→def location recorded on a `SymbolRef` to resolve
+/// more precisely) — same v0 approximation as [`build`], documented on the
+/// `call_graph` tool description.
+pub fn build_rooted_at(
+    index: &SymbolIndex,
+    def: &SymbolDef,
+    max_hops: usize,
+    direction: Direction,
+) -> CallGraphResult {
+    let mut result = CallGraphResult {
+        root: def.name.clone(),
+        callees: Vec::new(),
+        callers: Vec::new(),
+        cycles_detected: Vec::new(),
+        truncated: false,
+    };
+
+    if max_hops == 0 {
+        return result;
+    }
+
+    if matches!(direction, Direction::Callees | Direction::Both) {
+        let root_def = def.clone();
+        let root_name = root_def.name.clone();
+        bfs_expand(
+            index,
+            &root_name,
+            max_hops,
+            &mut result.callees,
+            &mut result.cycles_detected,
+            &mut result.truncated,
+            move |idx: &SymbolIndex, current: &str| {
+                if current == root_def.name.as_str() {
+                    callees_of_def(idx, &root_def)
+                } else {
+                    callees_of(idx, current)
+                }
+            },
+        );
+    }
+
+    if matches!(direction, Direction::Callers | Direction::Both) {
+        bfs_expand(
+            index,
+            &def.name,
             max_hops,
             &mut result.callers,
             &mut result.cycles_detected,

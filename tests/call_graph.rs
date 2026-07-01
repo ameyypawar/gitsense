@@ -84,3 +84,57 @@ fn call_graph_reports_minimal_depth() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Fix #8 Part B: `graph::build_rooted_at` must scope the ROOT's callees to
+/// one exact definition, not union across every def sharing its name.
+///
+/// Fixture: tests/fixtures/collision_calls/{a,b}.rs — each defines its own
+/// `fn helper()` that calls a different target (`target_a` / `target_b`).
+/// The old name-based `graph::build` unions both; `build_rooted_at`, given
+/// one specific `helper` definition, must see only that definition's own
+/// callee.
+#[test]
+fn build_rooted_at_scopes_callees_to_exact_def() -> anyhow::Result<()> {
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/collision_calls"
+    ));
+    let idx = SymbolIndex::build(fixture)?;
+
+    let helpers = idx.definitions("helper");
+    assert_eq!(
+        helpers.len(),
+        2,
+        "expected 2 'helper' defs; got {:?}",
+        helpers
+    );
+
+    // Baseline: name-based `build` unions callees across BOTH same-named defs.
+    let unioned = graph::build(&idx, "helper", 2, Direction::Callees);
+    let unioned_names: Vec<&str> = unioned.callees.iter().map(|e| e.to.as_str()).collect();
+    assert!(
+        unioned_names.contains(&"target_a") && unioned_names.contains(&"target_b"),
+        "expected build() to union both siblings' callees; got {:?}",
+        unioned_names
+    );
+
+    // build_rooted_at, scoped to one specific def, must see ONLY that def's
+    // own callee — never the sibling's.
+    for def in helpers {
+        let g = graph::build_rooted_at(&idx, def, 2, Direction::Callees);
+        let names: Vec<&str> = g.callees.iter().map(|e| e.to.as_str()).collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "rooted-at graph should see exactly 1 direct callee; got {:?}",
+            names
+        );
+        assert!(
+            names[0] == "target_a" || names[0] == "target_b",
+            "unexpected callee {:?}",
+            names
+        );
+    }
+
+    Ok(())
+}
