@@ -42,8 +42,15 @@ impl GitSenseServer {
 
 // ── Error helper ──────────────────────────────────────────────────────────────
 
+/// Convert an internal `anyhow::Error` into a client-facing `ErrorData`.
+///
+/// The full error (with its cause chain) is logged server-side only; the
+/// client gets a generic message with no paths or other server-side detail
+/// (this server is deployed publicly, so error bodies must not leak
+/// filesystem layout — see #5).
 fn to_mcp_err(e: anyhow::Error) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
+    tracing::error!("tool call failed: {:#}", e);
+    ErrorData::internal_error("internal error", None)
 }
 
 // ── Kind string → SymbolKind ──────────────────────────────────────────────────
@@ -409,3 +416,20 @@ impl GitSenseServer {
         All analysis is approximate: dynamic dispatch, trait objects, and macro-expanded calls may be missed."
 )]
 impl ServerHandler for GitSenseServer {}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #5: client-facing errors must never leak server filesystem paths.
+    #[test]
+    fn to_mcp_err_does_not_leak_paths() {
+        let err = to_mcp_err(anyhow::anyhow!(
+            "opening repo at /tmp/gitsense-target/secret"
+        ));
+        assert!(!err.message.contains("/tmp/gitsense-target"));
+        assert!(!err.message.contains("secret"));
+    }
+}

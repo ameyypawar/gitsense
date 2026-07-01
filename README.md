@@ -72,6 +72,11 @@ Run gitsense as an HTTP server (Streamable HTTP, endpoint at `/mcp`):
   --port 8080
 ```
 
+By default the server binds `127.0.0.1` (loopback only). Pass `--host 0.0.0.0`
+(or set `GITSENSE_HOST=0.0.0.0`) to explicitly expose it to your LAN/network —
+only do this if you also trust everything on that network, since the MCP
+endpoint has no auth of its own.
+
 Then add it as a remote MCP server in Claude Code:
 
 ```bash
@@ -164,7 +169,7 @@ Honest note: narsil-mcp also does per-symbol blame; gitsense's distinguishing cl
 
 ```
 src/
-  main.rs           CLI (gitsense-mcp binary): --repo-path, --transport, --port
+  main.rs           CLI (gitsense-mcp binary): --repo-path, --transport, --port, --host
   lib.rs            Library root (re-exports git, graph, http, index, tools)
   http.rs           build_router: StreamableHttpService mounted at /mcp
   bin/

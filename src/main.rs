@@ -30,6 +30,12 @@ struct Cli {
     /// HTTP port (used when --transport http).
     #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// HTTP bind host (used when --transport http). Defaults to loopback
+    /// (127.0.0.1) so the dev server isn't reachable from the network;
+    /// pass 0.0.0.0 to explicitly expose it to the LAN/network.
+    #[arg(long, env = "GITSENSE_HOST", default_value = "127.0.0.1")]
+    host: String,
 }
 
 // ── Shared state construction ─────────────────────────────────────────────────
@@ -72,10 +78,10 @@ async fn main() -> anyhow::Result<()> {
                 .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
                 .unwrap_or_else(|| vec!["localhost".into(), "127.0.0.1".into(), "::1".into()]);
             let router = build_router(state, allowed_hosts);
-            let addr = format!("0.0.0.0:{}", cli.port);
+            let addr = format!("{}:{}", cli.host, cli.port);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            eprintln!("gitsense-mcp listening on http://0.0.0.0:{}/mcp", cli.port);
-            tracing::info!("gitsense-mcp listening on http://0.0.0.0:{}/mcp", cli.port);
+            eprintln!("gitsense-mcp listening on http://{}/mcp", addr);
+            tracing::info!("gitsense-mcp listening on http://{}/mcp", addr);
             axum::serve(listener, router).await?;
         }
         "stdio" => {
