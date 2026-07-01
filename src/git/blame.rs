@@ -72,11 +72,61 @@ pub(crate) fn blame_last_ts_with_repo(
     Ok(last_ts)
 }
 
+/// Returns `true` when the on-disk worktree content of `file_rel` differs
+/// from the blob recorded for it in `head_id`'s tree, or `file_rel` is absent
+/// from that tree entirely (new/untracked file).
+///
+/// `blame_file` (called by [`blame_range`]) always blames the committed HEAD
+/// blob, never on-disk content (gix does not support blaming a dirty
+/// worktree blob). This check lets callers detect the skew instead of
+/// silently mis-attributing lines — see #6.
+///
+/// Errors (failure to read the worktree file, corrupt tree, hashing failure)
+/// are treated as `Ok(true)` by the caller via `.unwrap_or(true)`: when
+/// staleness can't be proven false, the conservative answer is "assume
+/// dirty" rather than silently claiming the file is clean.
+fn worktree_is_dirty(
+    repo: &gix::Repository,
+    repo_root: &Path,
+    file_rel: &Path,
+    head_id: gix::Id<'_>,
+) -> anyhow::Result<bool> {
+    let head_tree = head_id
+        .object()
+        .with_context(|| format!("resolving HEAD object {head_id}"))?
+        .into_commit()
+        .tree()
+        .with_context(|| format!("loading HEAD tree for {head_id}"))?;
+
+    let head_blob_id = head_tree
+        .lookup_entry_by_path(file_rel)
+        .with_context(|| format!("looking up '{}' in HEAD tree", file_rel.display()))?
+        .map(|entry| entry.object_id());
+
+    let worktree_bytes = match std::fs::read(repo_root.join(file_rel)) {
+        Ok(bytes) => bytes,
+        // Missing from the worktree (e.g. deleted since HEAD) — can't compare
+        // content, so report dirty rather than silently treating it as clean.
+        Err(_) => return Ok(true),
+    };
+
+    let worktree_blob_id =
+        gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &worktree_bytes)
+            .with_context(|| format!("hashing worktree content of '{}'", file_rel.display()))?;
+
+    Ok(head_blob_id != Some(worktree_blob_id))
+}
+
 /// Compute blame for `[start_line, end_line]` (1-based, inclusive) in `file`.
 ///
 /// `file` may be absolute or repo-relative; an absolute path is stripped to be
 /// relative to `repo_root`.  The repo is opened fresh inside this function so
 /// no `gix::Repository` (which is `!Send`) ever escapes the call frame.
+///
+/// Blame always runs against HEAD, not the on-disk worktree (see
+/// `worktree_is_dirty`) — the returned [`BlameResult::worktree_dirty`] flags
+/// when the file has uncommitted changes, so line numbers may not correspond
+/// to what's currently on disk (#6).
 pub fn blame_range(
     repo_root: &Path,
     file: &Path,
@@ -147,6 +197,9 @@ pub fn blame_range(
         );
     }
 
+    // ── Detect worktree/HEAD skew (#6) ────────────────────────────────────
+    let worktree_dirty = worktree_is_dirty(&repo, repo_root, file_rel, head_id).unwrap_or(true);
+
     // ── Build result ──────────────────────────────────────────────────────
     let mut lines: Vec<BlameLine> = Vec::with_capacity(outcome.entries.len());
     let mut last_timestamp = i64::MIN;
@@ -204,6 +257,7 @@ pub fn blame_range(
         last_date,
         last_timestamp,
         last_message,
+        worktree_dirty,
     })
 }
 
@@ -242,5 +296,82 @@ mod tests {
             "last_timestamp must be a positive unix epoch; got {}",
             result.last_timestamp
         );
+
+        // #6: don't assert a specific `worktree_dirty` value here — a local
+        // dev checkout may legitimately have uncommitted edits to
+        // src/main.rs, which would make a hard-coded expectation flaky.
+        // Just prove the field exists and serializes.
+        let json = serde_json::to_value(&result).expect("BlameResult must serialize to JSON");
+        assert!(
+            json.get("worktree_dirty").is_some(),
+            "worktree_dirty must be present in serialized BlameResult; got {json:?}"
+        );
+    }
+
+    /// #6: deterministic dirty-vs-clean detection using a throwaway temp repo
+    /// (not gitsense's own checkout), so this test never depends on the
+    /// state of the dev tree it runs in.
+    ///
+    /// Requires a `git` binary on PATH to build the fixture — guaranteed on
+    /// the CI runner (which itself checked this repo out via git) and on any
+    /// realistic dev machine.
+    #[test]
+    fn blame_range_detects_dirty_worktree() {
+        use std::process::Command;
+
+        let repo_root = std::env::temp_dir().join(format!(
+            "gitsense-blame-dirty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&repo_root).expect("create temp repo dir");
+
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(&repo_root)
+                .status()
+                .expect("git must be on PATH to run this test");
+            assert!(status.success(), "`git {}` failed", args.join(" "));
+        };
+
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "gitsense test"]);
+
+        let file_path = repo_root.join("hello.rs");
+        std::fs::write(&file_path, "fn hello() {}\n").expect("write initial file");
+        run(&["add", "hello.rs"]);
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "initial commit",
+        ]);
+
+        // Clean worktree: on-disk content matches the committed HEAD blob.
+        let clean = blame_range(&repo_root, Path::new("hello.rs"), 1, 1)
+            .expect("blame_range should succeed on a clean worktree");
+        assert!(
+            !clean.worktree_dirty,
+            "freshly committed, unmodified file must not be flagged dirty"
+        );
+
+        // Dirty worktree: modify the file on disk without committing.
+        std::fs::write(&file_path, "fn hello() { /* uncommitted edit */ }\n")
+            .expect("modify file on disk");
+        let dirty = blame_range(&repo_root, Path::new("hello.rs"), 1, 1)
+            .expect("blame_range should still succeed against HEAD despite dirty worktree");
+        assert!(
+            dirty.worktree_dirty,
+            "file with uncommitted on-disk changes must be flagged dirty"
+        );
+
+        let _ = std::fs::remove_dir_all(&repo_root);
     }
 }

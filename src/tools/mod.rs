@@ -175,11 +175,19 @@ impl GitSenseServer {
     ///
     /// Git history is the unique differentiator: see exactly who last touched
     /// a function's body and in which commit.
+    ///
+    /// Blame always runs against HEAD, never the on-disk worktree (#6) — the
+    /// `worktree_dirty` field on the response flags when the file has
+    /// uncommitted changes, so callers know when line numbers may be stale.
     #[tool(
         description = "Show git blame attribution for a named Rust symbol using actual commit history. \
         Resolves the symbol to its definition's line range, then runs git blame over that range. \
         Returns per-hunk blame (author, commit, date, message) plus convenience last_author / \
         last_commit_short / last_date fields identifying the most recently committed hunk. \
+        Blame always reflects the last COMMITTED version of the file (HEAD), never uncommitted \
+        on-disk edits. The response includes worktree_dirty: true when the file has uncommitted \
+        changes (or is untracked), meaning line numbers/attribution may not match what's currently \
+        on disk — re-run after committing for accurate line numbers. \
         Returns an error if the symbol is not found or the repo has no history."
     )]
     async fn blame_symbol(
@@ -410,7 +418,8 @@ impl GitSenseServer {
         (1) search_symbols — find Rust symbols by name substring / kind across all .rs files; \
         (2) find_references — locate every call-site reference to a named symbol; \
         (3) call_graph — build a caller/callee graph rooted at a function (name-based, approximate); \
-        (4) blame_symbol — show git blame attribution for a symbol's body (who last touched it and when); \
+        (4) blame_symbol — show git blame attribution for a symbol's body (who last touched it and when; \
+        always reflects HEAD, not uncommitted worktree edits — see worktree_dirty in the response); \
         (5) find_dead_code — find unreferenced symbols enriched with git age (oldest untouched = safest to delete); \
         (6) repo_overview — high-level counts, module list, and hottest files by git churn. \
         All analysis is approximate: dynamic dispatch, trait objects, and macro-expanded calls may be missed."

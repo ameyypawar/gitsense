@@ -56,6 +56,14 @@ pub struct BlameResult {
     pub last_date: String,
     pub last_timestamp: i64,
     pub last_message: String,
+
+    /// `true` when the on-disk worktree content of the blamed file differs
+    /// from the blob committed at HEAD, or the path is absent from HEAD
+    /// entirely (new/untracked file). `blame_range` always blames the
+    /// committed HEAD blob, never on-disk content — when this is `true`,
+    /// `lines` reflects HEAD, and line numbers/attribution may not match
+    /// what's currently on disk. See #6.
+    pub worktree_dirty: bool,
 }
 
 pub mod blame;
