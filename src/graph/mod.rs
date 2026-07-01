@@ -10,7 +10,7 @@
 //! - **callers_of**: O(all_fn_defs × refs_per_file) scan — fine for demo repos;
 //!   for production, build an inverted callers index at `SymbolIndex::build` time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -54,14 +54,15 @@ fn is_fn_like(kind: &SymbolKind) -> bool {
 
 /// Names that `name` calls.
 ///
-/// For each Fn/Method definition named `name`, collects every `SymbolRef` in
-/// the same file whose source line falls within the definition's `line_range`,
+/// Looks up the Fn/Method definition(s) named `name` via the O(1)
+/// `SymbolIndex::definitions` lookup, then collects every `SymbolRef` in the
+/// same file whose source line falls within each definition's `line_range`,
 /// keeping only names that resolve to at least one known definition.
 fn callees_of(index: &SymbolIndex, name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
-    for def in index.search_symbols(None, None) {
-        if def.name != name || !is_fn_like(&def.kind) {
+    for def in index.definitions(name) {
+        if !is_fn_like(&def.kind) {
             continue;
         }
         let Some(tags) = index.file_tags(&def.location.file) else {
@@ -88,6 +89,9 @@ fn callees_of(index: &SymbolIndex, name: &str) -> Vec<String> {
 ///
 /// # Performance note
 /// O(all_fn_defs × refs_per_file) — acceptable for v0 / demo-sized repos.
+/// TODO: inverted index — build a name → callers map once at
+/// `SymbolIndex::build` time instead of re-scanning every definition on each
+/// `call_graph` invocation.
 fn callers_of(index: &SymbolIndex, name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
 
@@ -113,69 +117,89 @@ fn callers_of(index: &SymbolIndex, name: &str) -> Vec<String> {
     out
 }
 
-// ── DFS expander ─────────────────────────────────────────────────────────────
+// ── BFS expander ─────────────────────────────────────────────────────────────
 
-/// Recursive DFS with explicit path tracking for cycle detection.
+/// If `ancestor` appears in `child`'s parent chain on the BFS traversal tree
+/// (or `child == ancestor`, a direct self-call), returns the closed cycle path
+/// `[ancestor, …, child, ancestor]`.  Returns `None` for a "cross" edge into a
+/// node visited via an unrelated branch — that is not a cycle, just a
+/// re-discovery, and is correctly ignored (same spirit as the old DFS's
+/// path-vs-visited distinction).
 ///
-/// `path` always contains the names from the root down to (and including)
-/// `current`.  When a neighbour already appears in `path`, the slice from its
-/// first occurrence to `current` plus the repeated name is recorded as a cycle.
-#[allow(clippy::too_many_arguments)]
-fn expand(
+/// v0 approximation: this reports edges that close a loop back to an ancestor
+/// on the traversal tree actually built, not every cycle latent in the full
+/// call graph.
+fn find_cycle(
+    parent: &HashMap<String, String>,
+    child: &str,
+    ancestor: &str,
+) -> Option<Vec<String>> {
+    let mut chain = vec![child.to_string()];
+    let mut node = child.to_string();
+    while let Some(next) = parent.get(&node) {
+        chain.push(next.clone());
+        node = next.clone();
+    }
+    // `chain` is [child, parent(child), parent(parent(child)), …, root].
+    let pos = chain.iter().position(|n| n == ancestor)?;
+    let mut cycle = chain[..=pos].to_vec(); // [child, …, ancestor]
+    cycle.reverse(); // [ancestor, …, child]
+    cycle.push(ancestor.to_string()); // close it: [ancestor, …, child, ancestor]
+    Some(cycle)
+}
+
+/// BFS traversal keyed by node, so the first (and only) visit to any node is
+/// its MINIMAL hop count — no in-budget edge is dropped because a node was
+/// first reached via a longer path.  Also removes the stack-overflow risk of
+/// deep recursion.
+///
+/// Each dequeued node's neighbour set is computed exactly once: if the node's
+/// depth is still under `max_hops` it is expanded (edges recorded, unvisited
+/// neighbours enqueued at `depth + 1`); if the node sits exactly at
+/// `max_hops`, its neighbours are only checked for emptiness, to set
+/// `truncated` without expanding further.
+fn bfs_expand(
     index: &SymbolIndex,
-    current: &str,
-    current_depth: usize,
+    root: &str,
     max_hops: usize,
-    path: &mut Vec<String>,
-    visited: &mut HashSet<String>,
     edges: &mut Vec<CallEdge>,
     cycles: &mut Vec<Vec<String>>,
     truncated: &mut bool,
     neighbor_fn: fn(&SymbolIndex, &str) -> Vec<String>,
 ) {
-    let neighbors = neighbor_fn(index, current);
-    let child_depth = current_depth + 1;
+    let mut visited: HashMap<String, usize> = HashMap::from([(root.to_string(), 0)]);
+    let mut parent: HashMap<String, String> = HashMap::new();
+    let mut queue: VecDeque<String> = VecDeque::from([root.to_string()]);
 
-    for neighbor in neighbors {
-        // Always record the edge, regardless of cycle / visited status.
-        edges.push(CallEdge {
-            from: current.to_string(),
-            to: neighbor.clone(),
-            depth: child_depth,
-        });
+    while let Some(current) = queue.pop_front() {
+        let depth = visited[&current];
+        let neighbors = neighbor_fn(index, &current);
 
-        if let Some(pos) = path.iter().position(|n| n == &neighbor) {
-            // `neighbor` is already on the current DFS path → cycle.
-            // Encode: path[pos..] + [neighbor] (the repeated node closes it).
-            let mut cycle = path[pos..].to_vec();
-            cycle.push(neighbor.clone());
-            cycles.push(cycle);
-        } else if !visited.contains(&neighbor) {
-            if child_depth >= max_hops {
-                // Depth limit reached; flag truncation if the node has further neighbors.
-                if !neighbor_fn(index, &neighbor).is_empty() {
-                    *truncated = true;
+        if depth >= max_hops {
+            // Boundary node: only check whether it hides further, unexpanded edges.
+            if !neighbors.is_empty() {
+                *truncated = true;
+            }
+            continue;
+        }
+
+        let child_depth = depth + 1;
+        for neighbor in neighbors {
+            if visited.contains_key(&neighbor) {
+                if let Some(cycle) = find_cycle(&parent, &current, &neighbor) {
+                    cycles.push(cycle);
                 }
             } else {
-                visited.insert(neighbor.clone());
-                path.push(neighbor.clone());
-                expand(
-                    index,
-                    &neighbor,
-                    child_depth,
-                    max_hops,
-                    path,
-                    visited,
-                    edges,
-                    cycles,
-                    truncated,
-                    neighbor_fn,
-                );
-                path.pop();
+                edges.push(CallEdge {
+                    from: current.clone(),
+                    to: neighbor.clone(),
+                    depth: child_depth,
+                });
+                visited.insert(neighbor.clone(), child_depth);
+                parent.insert(neighbor.clone(), current.clone());
+                queue.push_back(neighbor);
             }
         }
-        // If neighbor is already in `visited` but NOT in `path`, it was fully
-        // expanded via another branch — skip to avoid duplicate subgraph traversal.
     }
 }
 
@@ -184,9 +208,12 @@ fn expand(
 /// Build a call-graph rooted at `symbol`.
 ///
 /// - `max_hops == 0` returns only the root with no edges.
-/// - Cyclic graphs are safe: the DFS path guard guarantees termination.
+/// - Cyclic graphs are safe: the BFS visited-map guard guarantees termination.
 /// - `cycles_detected` entries have the form `[first_node, …, first_node]`
 ///   (the repeated name closes the cycle path).
+/// - Every reported `CallEdge.depth` is the MINIMAL hop count to that node
+///   (BFS first-visit order), not merely the hop count of whichever path the
+///   traversal happened to try first.
 pub fn build(
     index: &SymbolIndex,
     symbol: &str,
@@ -206,15 +233,10 @@ pub fn build(
     }
 
     if matches!(direction, Direction::Callees | Direction::Both) {
-        let mut path = vec![symbol.to_string()];
-        let mut visited: HashSet<String> = HashSet::from([symbol.to_string()]);
-        expand(
+        bfs_expand(
             index,
             symbol,
-            0,
             max_hops,
-            &mut path,
-            &mut visited,
             &mut result.callees,
             &mut result.cycles_detected,
             &mut result.truncated,
@@ -223,15 +245,10 @@ pub fn build(
     }
 
     if matches!(direction, Direction::Callers | Direction::Both) {
-        let mut path = vec![symbol.to_string()];
-        let mut visited: HashSet<String> = HashSet::from([symbol.to_string()]);
-        expand(
+        bfs_expand(
             index,
             symbol,
-            0,
             max_hops,
-            &mut path,
-            &mut visited,
             &mut result.callers,
             &mut result.cycles_detected,
             &mut result.truncated,

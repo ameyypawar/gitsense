@@ -45,3 +45,42 @@ fn call_graph_cycle_safe() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Fix #4 regression: BFS must report the MINIMAL hop count to a node
+/// reachable both directly and via a longer path.
+///
+/// Fixture: tests/fixtures/diamond/code.rs
+///   fn a() { b(); c(); }   // a→b and a→c, both depth 1
+///   fn b() { c(); }        // a→b→c would be depth 2
+///   fn c() {}
+///
+/// The old DFS traversed `b` before `c` (sorted neighbor order) and recursed
+/// into `b` first, reaching `c` at depth 2 via `b` and recording that edge
+/// before the direct depth-1 a→c edge — so a first-match lookup returned the
+/// wrong (longer) depth. BFS visits `c` for the first time via the direct
+/// edge, so exactly one edge targets `c`, at depth 1.
+#[test]
+fn call_graph_reports_minimal_depth() -> anyhow::Result<()> {
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/diamond"
+    ));
+    let idx = SymbolIndex::build(fixture)?;
+
+    let g = graph::build(&idx, "a", 3, Direction::Callees);
+
+    let edges_to_c: Vec<_> = g.callees.iter().filter(|e| e.to == "c").collect();
+    assert_eq!(
+        edges_to_c.len(),
+        1,
+        "expected exactly one edge reaching 'c'; callees = {:?}",
+        g.callees
+    );
+    assert_eq!(
+        edges_to_c[0].depth, 1,
+        "edge reaching 'c' should be the direct depth-1 edge, not the depth-2 path via 'b'; callees = {:?}",
+        g.callees
+    );
+
+    Ok(())
+}

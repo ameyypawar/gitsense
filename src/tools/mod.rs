@@ -132,9 +132,11 @@ impl GitSenseServer {
     ///
     /// CAVEAT: name-based resolution — overloads, closures, and
     /// macro-expanded calls may be mis-attributed.  Results are approximate.
+    /// Runs on a blocking-task thread since BFS traversal is CPU-bound.
     #[tool(
         description = "Build a call graph rooted at a Rust function or method. \
-        direction: callees | callers | both (default: both). max_hops default: 3. \
+        direction: callees | callers | both (default: both). max_hops default: 3, \
+        hard-capped at 32 regardless of the requested value. \
         CAVEAT: name-based resolution — overloads, closures, and macro-expanded calls may \
         be mis-attributed or missing. Cycles are detected and reported. Graph may be truncated \
         when max_hops is reached."
@@ -143,15 +145,22 @@ impl GitSenseServer {
         &self,
         Parameters(p): Parameters<CallGraphParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        /// Hard ceiling for `max_hops` to bound BFS traversal cost.
+        const MAX_HOPS: usize = 32;
+
         let index = Arc::clone(&self.state.index);
         let direction = p
             .direction
             .as_deref()
             .map(parse_direction)
             .unwrap_or(Direction::Both);
-        let max_hops = p.max_hops.unwrap_or(3);
+        let max_hops = p.max_hops.unwrap_or(3).min(MAX_HOPS);
+        let name = p.name.clone();
 
-        let result = graph::build(&index, &p.name, max_hops, direction);
+        let result =
+            tokio::task::spawn_blocking(move || graph::build(&index, &name, max_hops, direction))
+                .await
+                .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?;
         json_result(&result)
     }
 
