@@ -612,4 +612,82 @@ mod tests {
             "'const' must be unaccepted — const_item is never a definition tag"
         );
     }
+
+    /// #9 end-to-end test: drives real `#[tool]` handlers
+    /// (`GitSenseServer::search_symbols`, `GitSenseServer::blame_symbol`)
+    /// across the async boundary, not just the underlying `SymbolIndex` /
+    /// `git::blame` functions every other test in this repo exercises
+    /// directly. Proves the `#[tool]` / `Parameters` / `CallToolResult`
+    /// wiring actually works, including the `spawn_blocking` git path.
+    ///
+    /// Lives here (a unit test inside `tools/mod.rs`) rather than in
+    /// `tests/` because the handler methods are private to this module.
+    #[tokio::test]
+    async fn tool_handlers_end_to_end() -> anyhow::Result<()> {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf();
+        let index = Arc::new(SymbolIndex::build(&repo_root)?);
+        let state = Arc::new(AppState {
+            index,
+            repo_root: repo_root.clone(),
+            churn_cache: OnceLock::new(),
+        });
+        let server = GitSenseServer::new(state);
+
+        // ── search_symbols: pure, no git — always runs ──────────────────────
+        let search_result = server
+            .search_symbols(Parameters(SearchSymbolsParams {
+                name: Some("build".into()),
+                kind: None,
+            }))
+            .await
+            .expect("search_symbols handler call failed");
+
+        assert_ne!(
+            search_result.is_error,
+            Some(true),
+            "search_symbols should not report a tool-level error"
+        );
+        let search_text = search_result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str())
+            .expect("expected text content in search_symbols result");
+        assert!(
+            search_text.contains("build"),
+            "search_symbols result should mention the known symbol 'build'; got: {search_text}"
+        );
+
+        // ── blame_symbol: also exercises the spawn_blocking git path ────────
+        // Skipped when there's no `.git` dir (e.g. a shallow/tarball checkout
+        // with no history to blame), mirroring `blame::tests::blame_range_gate`.
+        if repo_root.join(".git").exists() {
+            let blame_result = server
+                .blame_symbol(Parameters(BlameSymbolParams {
+                    name: "to_mcp_err".into(),
+                    file: None,
+                    line: None,
+                }))
+                .await
+                .expect("blame_symbol handler call failed");
+
+            assert_ne!(
+                blame_result.is_error,
+                Some(true),
+                "blame_symbol should succeed for a known, uniquely-named symbol"
+            );
+            let blame_text = blame_result
+                .content
+                .first()
+                .and_then(|c| c.as_text())
+                .map(|t| t.text.as_str())
+                .expect("expected text content in blame_symbol result");
+            assert!(
+                blame_text.contains("last_author"),
+                "blame_symbol result should contain blame data; got: {blame_text}"
+            );
+        }
+
+        Ok(())
+    }
 }
