@@ -55,7 +55,6 @@ pub struct SymbolIndex {
     defs_by_name: HashMap<String, Vec<SymbolDef>>,
     refs_by_name: HashMap<String, Vec<SymbolRef>>,
     tags_by_file: HashMap<PathBuf, FileTags>,
-    all_defs: Vec<SymbolDef>,
 }
 
 impl SymbolIndex {
@@ -69,9 +68,9 @@ impl SymbolIndex {
         let mut defs_by_name: HashMap<String, Vec<SymbolDef>> = HashMap::new();
         let mut refs_by_name: HashMap<String, Vec<SymbolRef>> = HashMap::new();
         let mut tags_by_file: HashMap<PathBuf, FileTags> = HashMap::new();
-        let mut all_defs: Vec<SymbolDef> = Vec::new();
 
         let mut parsed_files = 0usize;
+        let mut total_defs = 0usize;
         let mut total_refs = 0usize;
 
         for path in &files {
@@ -92,6 +91,7 @@ impl SymbolIndex {
             };
 
             parsed_files += 1;
+            total_defs += defs.len();
             total_refs += refs.len();
 
             for def in &defs {
@@ -99,7 +99,6 @@ impl SymbolIndex {
                     .entry(def.name.clone())
                     .or_default()
                     .push(def.clone());
-                all_defs.push(def.clone());
             }
 
             for r in &refs {
@@ -115,7 +114,7 @@ impl SymbolIndex {
         tracing::info!(
             "index built: {} files parsed, {} defs, {} refs",
             parsed_files,
-            all_defs.len(),
+            total_defs,
             total_refs,
         );
 
@@ -124,26 +123,38 @@ impl SymbolIndex {
             defs_by_name,
             refs_by_name,
             tags_by_file,
-            all_defs,
         })
     }
 
     /// Filter all defs by optional case-insensitive name substring and/or
     /// exact kind match.  Both filters are ANDed.
+    ///
+    /// Iterates `defs_by_name` (a `HashMap`, so unordered) rather than a
+    /// dedicated flat list (#7), so the result is explicitly sorted by
+    /// `(file, line)` to keep output deterministic for callers/tests.
     pub fn search_symbols(
         &self,
         name_substr: Option<&str>,
         kind: Option<SymbolKind>,
     ) -> Vec<&SymbolDef> {
-        self.all_defs
-            .iter()
+        let mut out: Vec<&SymbolDef> = self
+            .defs_by_name
+            .values()
+            .flatten()
             .filter(|def| {
                 let name_ok = name_substr
                     .is_none_or(|substr| def.name.to_lowercase().contains(&substr.to_lowercase()));
                 let kind_ok = kind.as_ref().is_none_or(|k| &def.kind == k);
                 name_ok && kind_ok
             })
-            .collect()
+            .collect();
+        out.sort_by(|a, b| {
+            a.location
+                .file
+                .cmp(&b.location.file)
+                .then(a.location.line.cmp(&b.location.line))
+        });
+        out
     }
 
     /// All call-site references recorded for `name` (exact match).
@@ -166,8 +177,9 @@ impl SymbolIndex {
     /// Definitions whose name has no entry in the references map — candidate
     /// dead code.  Used by the `find_dead_code` MCP tool (Phase 5).
     pub fn unreferenced_defs(&self) -> Vec<&SymbolDef> {
-        self.all_defs
-            .iter()
+        self.defs_by_name
+            .values()
+            .flatten()
             .filter(|def| !self.refs_by_name.contains_key(&def.name))
             .collect()
     }
@@ -235,12 +247,13 @@ impl SymbolIndex {
     /// Aggregate statistics over the full index.
     pub fn stats(&self) -> RepoStats {
         let file_count = self.tags_by_file.len();
-        let def_count = self.all_defs.len();
+        let all_defs = || self.defs_by_name.values().flatten();
+        let def_count = all_defs().count();
         let ref_count: usize = self.refs_by_name.values().map(Vec::len).sum();
 
         // Count defs per kind.
         let mut kind_counts: HashMap<String, usize> = HashMap::new();
-        for def in &self.all_defs {
+        for def in all_defs() {
             *kind_counts.entry(format!("{:?}", def.kind)).or_insert(0) += 1;
         }
         let mut by_kind: Vec<(String, usize)> = kind_counts.into_iter().collect();
@@ -248,9 +261,7 @@ impl SymbolIndex {
 
         // Prefer Mod-kind def names; fall back to file stems.
         let modules: Vec<String> = {
-            let mod_names: Vec<String> = self
-                .all_defs
-                .iter()
+            let mod_names: Vec<String> = all_defs()
                 .filter(|d| d.kind == SymbolKind::Mod)
                 .map(|d| d.name.clone())
                 .collect();

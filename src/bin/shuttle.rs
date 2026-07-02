@@ -59,6 +59,7 @@ async fn shuttle_main() -> shuttle_axum::ShuttleAxum {
     let state = Arc::new(AppState {
         index: Arc::new(index),
         repo_root,
+        churn_cache: std::sync::OnceLock::new(),
     });
 
     // Empty allowed_hosts → rmcp allows all inbound Host values.

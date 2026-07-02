@@ -53,6 +53,7 @@ async fn build_state(repo_path: PathBuf) -> anyhow::Result<Arc<AppState>> {
     Ok(Arc::new(AppState {
         index: Arc::new(index),
         repo_root: repo_path,
+        churn_cache: std::sync::OnceLock::new(),
     }))
 }
 

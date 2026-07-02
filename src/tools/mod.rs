@@ -1,7 +1,7 @@
 pub mod params;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use rmcp::{
@@ -25,6 +25,14 @@ use params::{
 pub struct AppState {
     pub index: Arc<SymbolIndex>,
     pub repo_root: PathBuf,
+    /// Cache for `history::file_churn` (#7), computed at most once.
+    ///
+    /// HEAD is fixed for the process lifetime — the server clones/opens the
+    /// repo once at startup and never fetches — so the churn walk produces
+    /// an identical result on every `repo_overview` call. A plain
+    /// process-lifetime `OnceLock` is therefore correct; keying by HEAD oid
+    /// would be overkill given the clone-once model.
+    pub churn_cache: OnceLock<Arc<Vec<(PathBuf, usize)>>>,
 }
 
 // ── Server type ───────────────────────────────────────────────────────────────
@@ -468,26 +476,39 @@ impl GitSenseServer {
         Parameters(_p): Parameters<RepoOverviewParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let index = Arc::clone(&self.state.index);
-        let repo_root = self.state.repo_root.clone();
 
         // Stats are pure index, no I/O.
         let stats = index.stats();
 
-        // Collect file paths for churn analysis.
-        let files: Vec<PathBuf> = index.file_paths().into_iter().cloned().collect();
+        // #7: HEAD never moves post-startup, so churn is identical on every
+        // call — compute it at most once and reuse the cached result.
+        let churn: Arc<Vec<(PathBuf, usize)>> = match self.state.churn_cache.get() {
+            Some(cached) => Arc::clone(cached),
+            None => {
+                let repo_root = self.state.repo_root.clone();
+                let files: Vec<PathBuf> = index.file_paths().into_iter().cloned().collect();
 
-        let churn = tokio::task::spawn_blocking(move || {
-            crate::git::history::file_churn(&repo_root, &files)
-        })
-        .await
-        .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?
-        .map_err(to_mcp_err)?;
+                // file_churn does !Send gix work — must stay inside spawn_blocking.
+                let computed = tokio::task::spawn_blocking(move || {
+                    crate::git::history::file_churn(&repo_root, &files)
+                })
+                .await
+                .map_err(|e| to_mcp_err(anyhow::anyhow!("spawn_blocking join error: {e}")))?
+                .map_err(to_mcp_err)?;
+
+                let computed = Arc::new(computed);
+                // Lost a race with a concurrent call: ignore the Err and use
+                // our own (equal) result rather than re-fetching.
+                let _ = self.state.churn_cache.set(Arc::clone(&computed));
+                computed
+            }
+        };
 
         // Convert churn paths to relative strings for readability.
         let churn_display: Vec<(String, usize)> = churn
-            .into_iter()
+            .iter()
             .take(20)
-            .map(|(p, n)| (p.to_string_lossy().into_owned(), n))
+            .map(|(p, n)| (p.to_string_lossy().into_owned(), *n))
             .collect();
 
         #[derive(Serialize)]
@@ -544,6 +565,32 @@ mod tests {
         ));
         assert!(!err.message.contains("/tmp/gitsense-target"));
         assert!(!err.message.contains("secret"));
+    }
+
+    /// #7: `AppState::churn_cache` must return the exact same cached value
+    /// on a second access rather than recomputing. This is the `OnceLock`
+    /// semantics `repo_overview` relies on to compute `file_churn` at most
+    /// once per process (see also `file_churn_is_stable_across_repeated_calls`
+    /// in `tests/churn_cache.rs`, which proves the underlying computation is
+    /// safe to cache in the first place).
+    #[test]
+    fn churn_cache_returns_same_value_on_second_access() {
+        let cache: OnceLock<Arc<Vec<(PathBuf, usize)>>> = OnceLock::new();
+        assert!(cache.get().is_none(), "cache must start empty");
+
+        let value = Arc::new(vec![(PathBuf::from("src/main.rs"), 3usize)]);
+        cache
+            .set(Arc::clone(&value))
+            .expect("first set must succeed");
+
+        let first = cache.get().expect("value must be present after set");
+        let second = cache.get().expect("value must still be present");
+
+        assert!(
+            Arc::ptr_eq(first, second),
+            "second access must return the same cached Arc, not a recomputed one"
+        );
+        assert_eq!(**first, *value);
     }
 
     /// #8 Part A: every kind string `parse_kind` accepts must correspond to
